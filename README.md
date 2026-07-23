@@ -28,7 +28,7 @@ future value of preserved inventory.
 > Survey production data, export-control reporting, and industry price commentary — and
 > are **not estimates statistically fitted to proprietary dealer data**, because no such
 > data exists to fit them to. Every parameter of this kind is labeled explicitly in
-> [`assumptions_register.md`](assumptions_register.md) as Real data,
+> [`docs/assumptions_register.md`](docs/assumptions_register.md) as Real data,
 > Analogous-market estimate, Academic-model assumption, or Judgment call, and that label
 > is the honest description of its evidentiary weight.
 >
@@ -53,7 +53,7 @@ future value of preserved inventory.
 
 The full version of this statement, along with the reasoning for writing it before any
 model code existed, is in
-[`README_honesty_paragraph.md`](README_honesty_paragraph.md).
+[`docs/README_honesty_paragraph.md`](docs/README_honesty_paragraph.md).
 
 ---
 
@@ -139,11 +139,11 @@ README, not presented as a finished result.
 
 ## Documentation index
 
-- [`assumptions_register.md`](assumptions_register.md) — every parameter, its
+- [`docs/assumptions_register.md`](docs/assumptions_register.md) — every parameter, its
   value, its meaning, its source type, its justification, and its expected sensitivity.
-- [`README_honesty_paragraph.md`](README_honesty_paragraph.md) — the full
+- [`docs/README_honesty_paragraph.md`](docs/README_honesty_paragraph.md) — the full
   honesty statement and why it was written before any model code.
-- [`phase0_research_notes.md`](phase0_research_notes.md) — the public research
+- [`docs/phase0_research_notes.md`](docs/phase0_research_notes.md) — the public research
   (gallium production concentration, export-control timeline, sector end-uses, and
   modeling-literature rationale) underlying the assumptions register.
 
