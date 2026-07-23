@@ -139,11 +139,11 @@ README, not presented as a finished result.
 
 ## Documentation index
 
-- [`docs/assumptions_register.md`](docs/assumptions_register.md) — every parameter, its
+- [`docs/assumptions_register.md`](assumptions_register.md) — every parameter, its
   value, its meaning, its source type, its justification, and its expected sensitivity.
-- [`docs/README_honesty_paragraph.md`](docs/README_honesty_paragraph.md) — the full
+- [`docs/README_honesty_paragraph.md`](README_honesty_paragraph.md) — the full
   honesty statement and why it was written before any model code.
-- [`docs/phase0_research_notes.md`](docs/phase0_research_notes.md) — the public research
+- [`docs/phase0_research_notes.md`](phase0_research_notes.md) — the public research
   (gallium production concentration, export-control timeline, sector end-uses, and
   modeling-literature rationale) underlying the assumptions register.
 
