@@ -63,7 +63,7 @@ model code existed, is in
 |---|---|---|
 | 0 | Research, assumptions register, honesty paragraph | ✅ Complete |
 | 1 | Simulation core (price process, Poisson demand, accounting, fixed-spread baseline) | ✅ Complete |
-| 2 | Standard Avellaneda–Stoikov reproduction | ⏳ Not started |
+| 2 | Standard Avellaneda–Stoikov reproduction | ✅ Complete |
 | 3 | Physical / committed / in-transit / expected inventory separation | ⏳ Not started |
 | 4 | Markov regimes and Hawkes demand | ⏳ Not started |
 | 5 | Scarcity-adjusted market-making policy | ⏳ Not started |
@@ -78,8 +78,9 @@ model code existed, is in
 
 - [`docs/assumptions_register.md`](docs/assumptions_register.md) — every parameter, its
   value, its meaning, its source type, its justification, and its expected sensitivity.
-  Section 7 logs the concrete numeric values Phase 1 code instantiates against these rows,
-  plus a list of deviations found and corrected during implementation.
+  Section 7 logs Phase 1's concrete numeric values; Section 8 logs Phase 2's
+  (Avellaneda-Stoikov and the inventory heuristic), including a calibration-dependent
+  finding worth reading before trusting any Phase 2 P&L comparison.
 - [`docs/README_honesty_paragraph.md`](docs/README_honesty_paragraph.md) — the full
   honesty statement and why it was written before any model code.
 - [`docs/phase0_research_notes.md`](docs/phase0_research_notes.md) — the public research
@@ -204,6 +205,121 @@ yet.
 
 ---
 
+## Phase 2 — Standard Avellaneda–Stoikov Model
+
+Phase 2 reproduces the standard, closed-form Avellaneda-Stoikov (2008) inventory-aware
+market-making model, and compares it against both Phase 1 comparison points the roadmap
+calls for: the fixed-spread baseline and a new inventory-threshold heuristic.
+
+### Components built
+
+| Module | What it does | Why it's included | Key limitation |
+|---|---|---|---|
+| `src/policies/avellaneda_stoikov.py` | Reservation price `r = s - q·γ·σ²·(T-t)`, optimal spread `δ = γσ²(T-t) + (2/γ)ln(1+γ/k)`, quotes `ask = r + δ/2`, `bid = r - δ/2` | The standard, citable inventory-aware quoting model (register `phase0_research_notes.md` §5) that every later scarcity/DP extension builds on | `sigma` is converted from price_process.py's fractional vol via `sigma_abs = sigma_frac * mid_price` — a documented adaptation, not an exact match to the underlying mean-reverting jump-diffusion; `k` is tuned for plausible spread magnitude, not fitted to `src/demand.py`'s actual hard-threshold fill model |
+| `src/policies/inventory_heuristic.py` | Step-function ask adjustment: extra markup when inventory ≤ a low threshold, discount when ≥ a high threshold, base markup otherwise | The roadmap-required middle comparison point — shows whether AS's benefit (if any) comes from being inventory-aware at all, or from its specific continuous, theoretically-derived adjustment shape | Discontinuous by construction (a 1 kg inventory move across a threshold jumps the quote); thresholds are judgment calls, logged in the register |
+| `src/simulation.py` (extended) | Now passes `t`, `T` (years), and `sigma` (fractional) to every policy's `quote_ask`, and records any policy's `last_diagnostics` dict generically | Lets AS use time-to-horizon and volatility without hardcoding policy-specific logic into the simulation loop; the generic diagnostics hook means no `isinstance` branching is needed to plot AS-specific internals later | Fixed-spread and inventory-heuristic policies simply ignore the new `t`/`T`/`sigma` kwargs via the shared interface |
+
+### Tests
+
+21 new tests across 3 files (47 total, all passing):
+
+```
+tests/test_avellaneda_stoikov.py    — reservation-price sign/magnitude behavior,
+                                       risk-aversion scaling, time-horizon decay,
+                                       spread properties, invalid-parameter guards
+tests/test_inventory_heuristic.py   — threshold behavior, boundary inclusivity
+tests/test_phase2_comparison.py     — matched-path structural comparisons across
+                                       all three policies (NOT outcome-superiority
+                                       claims — see file docstring for why)
+```
+
+Run them with `python -m pytest tests/ -v`.
+
+### Mastery checkpoint (write from memory, then check against this)
+
+**The formula:**
+
+```
+r(s, t) = s - q · γ · σ² · (T - t)
+δ = γσ²(T - t) + (2/γ)·ln(1 + γ/k)
+ask = r + δ/2        bid = r - δ/2
+```
+
+**Why inventory enters the formula:** a dealer holding inventory carries price risk on
+it. The reservation price is not "the market price" — it's the price at which the dealer,
+*given their current position*, is indifferent to holding one more unit. Inventory risk
+has to enter the price the dealer is willing to trade at, or the quote says nothing about
+the dealer's actual exposure.
+
+**Why excess inventory lowers the quote:** more inventory (`q` large and positive) means
+more downside risk if price falls, so the dealer's true indifference point sits below mid
+— they'd rather sell some off, even at a discount. The minus sign in `s - q·γ·σ²·(T-t)`
+is what encodes "sell it down."
+
+**Why risk aversion strengthens the adjustment:** `γ` multiplies the entire inventory-risk
+term. A more risk-averse dealer demands a bigger price concession for the same inventory
+and the same volatility — this falls directly out of the formula, not from a separate
+assumption.
+
+**Why the effect shrinks near the end of the trading horizon:** both the reservation shift
+and the first spread term scale with `(T - t)`. As `t → T`, that factor → 0, so holding
+inventory near the end carries less *future* price risk simply because there's less
+future left. The spread doesn't fully collapse, though — the `(2/γ)ln(1+γ/k)` term is
+independent of time remaining and persists even at `t = T` (order-flow/adverse-selection
+compensation, confirmed in `test_spread_does_not_fully_collapse_at_horizon_end`).
+
+### Demo output
+
+`results/figures/phase2_as_diagnostics.png` — mid price, reservation price, bid, and ask
+over one simulated year, plus inventory, quoted spread, and cash. Reservation price
+tracks mid price closely (inventory-driven deviations are on the order of a few dollars
+at ~200 kg inventory, as tuned — see the register), and the quoted spread stays in a
+roughly 2.5–3% band, widening slightly with volatility and inventory swings.
+
+`results/figures/phase2_pnl_distribution_preview.png` — terminal mark-to-market P&L
+across 60 matched seeds for all three policies. This is a **single-seed-per-run preview**
+of the kind of comparison Phase 8 does properly (with confidence intervals and paired
+tests) — not a substitute for it.
+
+### A finding worth reading before trusting any Phase 2 number
+
+At this phase's calibration (`γ = 3.5e-6`, `k = 0.2`), Avellaneda-Stoikov quotes a much
+tighter average markup (~0.53%) than the fixed-spread baseline (4.00%) — thinner, in fact,
+than the 3% restock markup, meaning the dealer is often selling close to or below its own
+replenishment cost. Fill rate roughly doubles (≈42% vs. ≈20%), but average mark-to-market
+P&L across 60 matched seeds comes out lower (~$48,000 vs. ~$80,500 for fixed-spread).
+
+**This is not a claim that Avellaneda-Stoikov underperforms in general.** `γ` and `k` are
+both registered as judgment calls with Sensitivity: High, explicitly slated for Phase 9's
+sweep — this result is a consequence of *this* calibration, not of the model's structure.
+It's recorded honestly (register §8) so that a future Phase 9 sweep showing different `k`
+values produce different outcomes reads as "the sweep did its job," not as a contradiction
+of an unstated claim made here.
+
+### Explicit Phase 2 limitations (Core Rule test)
+
+- AS's `sigma` is adapted from a fractional/multiplicative process into an absolute-vol
+  approximation; the underlying SDE also has mean reversion and jumps that the classical
+  AS derivation doesn't model at all.
+- AS's assumed order-arrival intensity, `λ(δ) = A·exp(-k·δ)`, is not the execution model
+  `src/demand.py` actually uses (a hard willingness-to-pay threshold) — `k` is tuned for
+  plausible spread magnitude, not fitted to match that mismatch away.
+- Inventory `q` enters as raw kilograms, not centered on a target/safety-stock level —
+  faithful to the original paper, but it means zero inventory (not safety-stock-level
+  inventory) is this module's reservation-price-neutral point. Phase 5 recenters this.
+- The inventory heuristic's thresholds and adjustment sizes are judgment calls with no
+  prior register row — logged in Section 8 now, per this project's own rule.
+- Neither AS nor the heuristic yet has a genuine customer-facing bid (see Phase 1
+  limitations, unchanged) — `restock_markup_frac` remains a supplier-procurement-premium
+  stand-in for both.
+
+If Phase 2 were removed: there would be no principled, inventory-aware quoting policy for
+Phase 5's scarcity-adjusted model to extend, and no evidence (however preliminary) of
+*how* an inventory-aware policy's behavior actually differs from a naive one — only the
+claim that it should, in theory.
+
+---
+
 ## Repository structure (current)
 
 ```
@@ -220,31 +336,42 @@ GaMM-RX/
 │   ├── accounting.py
 │   ├── simulation.py
 │   └── policies/
-│       └── fixed_spread.py
+│       ├── fixed_spread.py
+│       ├── inventory_heuristic.py
+│       └── avellaneda_stoikov.py
 ├── tests/
 │   ├── test_price_process.py
 │   ├── test_demand.py
 │   ├── test_accounting.py
-│   └── test_policies.py
+│   ├── test_policies.py
+│   ├── test_avellaneda_stoikov.py
+│   ├── test_inventory_heuristic.py
+│   └── test_phase2_comparison.py
 └── results/
     └── figures/
-        └── phase1_demo_run.png
+        ├── phase1_demo_run.png
+        ├── phase2_as_diagnostics.png
+        └── phase2_pnl_distribution_preview.png
 ```
 
 Modules planned by the full roadmap (`regimes.py`, `supply_chain.py`,
-`avellaneda_stoikov.py`, `scarcity_adjusted_as.py`, `dynamic_programming.py`,
-`optimization.py`, `evaluation.py`, `visualization.py`, and the full `notebooks/` tree)
-do not exist yet and are not implied to exist by this README — they are listed in the
-project roadmap as future work, not represented here as finished.
+`scarcity_adjusted_as.py`, `dynamic_programming.py`, `optimization.py`, `evaluation.py`,
+`visualization.py`, and the full `notebooks/` tree) do not exist yet and are not implied
+to exist by this README — they are listed in the project roadmap as future work, not
+represented here as finished.
 
 ## Future Work
 
-- Everything in Phases 2–11 of the roadmap: standard Avellaneda–Stoikov, real
-  supply-chain inventory, regime switching, Hawkes demand, the scarcity-adjusted policy,
-  dynamic programming, sector stress testing, matched Monte Carlo with confidence
-  intervals, ablation/sensitivity analysis, and qualitative historical validation.
-- A genuine customer-facing bid (currently `bid_markup_frac` is a supplier procurement
-  premium stand-in — see Phase 1 limitations above) once customer sell-side flow exists.
-- A smoother (non-threshold) fill-probability function for customer orders.
+- Everything in Phases 3–11 of the roadmap: real supply-chain inventory, regime
+  switching, Hawkes demand, the scarcity-adjusted policy, dynamic programming, sector
+  stress testing, matched Monte Carlo with confidence intervals, ablation/sensitivity
+  analysis, and qualitative historical validation.
+- Phase 9's planned sweep of `γ` and `k` — needed before the Phase 2 "AS underperforms at
+  this calibration" finding can be read as anything more than a single-point observation.
+- A genuine customer-facing bid (currently `bid_markup_frac`/`restock_markup_frac` are
+  supplier procurement-premium stand-ins — see Phase 1/2 limitations above) once customer
+  sell-side flow exists.
+- A smoother (non-threshold) fill-probability function for customer orders, which would
+  also let `k` be fitted to the actual execution model instead of tuned by feel.
 - A properly fitted skewed jump-size distribution (currently a biased-coin/half-normal
   approximation of the register's right-skew requirement).
