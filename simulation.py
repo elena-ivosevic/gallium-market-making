@@ -137,6 +137,12 @@ class Simulation:
         self.backorder_queue: list[dict] = []  # only used in Phase 3 mode
         self.tranche_history: list[dict] = []  # only populated in Phase 3 mode
         self.stockout_events = 0               # only incremented in Phase 3 mode
+        self.total_military_kg_committed = 0.0  # (addendum) cumulative kg ever reserved
+                                                 # via a military-linked commitment -- used
+                                                 # to compute an honest DELIVERY-confirmed
+                                                 # rate, not just an acceptance rate (see
+                                                 # "military_fill_rate" caveat in run()'s
+                                                 # result dict)
 
         self.order_log: list[dict] = []
         self.policy_diagnostics: list[dict] = []
@@ -179,6 +185,7 @@ class Simulation:
                         "ask": ask,
                         "size_kg": order.size_kg,
                         "willingness_to_pay": order.willingness_to_pay,
+                        "military_linked": order.military_linked,
                         "filled": filled,
                         "fill_type": fill_type,
                     }
@@ -237,6 +244,11 @@ class Simulation:
         }
 
         if self.supply_chain is not None:
+            military_orders = [o for o in self.order_log if o["military_linked"]]
+            civilian_orders = [o for o in self.order_log if not o["military_linked"]]
+            military_filled = sum(1 for o in military_orders if o["filled"])
+            civilian_filled = sum(1 for o in civilian_orders if o["filled"])
+
             result.update(
                 {
                     "tranche_history": self.tranche_history,
@@ -246,6 +258,40 @@ class Simulation:
                     "kg_lost_to_failed_deliveries": self.supply_chain.total_kg_lost_to_failure,
                     "stockout_events": self.stockout_events,
                     "final_backorder_queue_kg": sum(b["kg"] for b in self.backorder_queue),
+                    "cumulative_backlog_penalty": self.book.cumulative_backlog_penalty,
+                    "cumulative_lost_delivery_cost": self.book.cumulative_lost_delivery_cost,
+                    # (addendum, register Section 10) military vs. civilian breakdown --
+                    # the headline comparison this project's second core research
+                    # question depends on. n_orders/n_filled above remain the pooled
+                    # totals for backward compatibility with Phase 1/2 result-dict shape.
+                    #
+                    # CAVEAT, found during Phase 3 addendum integration testing:
+                    # "military_fill_rate" measures whether an order was ACCEPTED
+                    # (immediate sale, backordered, or emergency-backordered) -- NOT
+                    # whether the promised gallium was ever actually delivered. A
+                    # military order accepted into the backorder queue counts as
+                    # "filled" here even if it is still sitting unfulfilled at the
+                    # end of the simulation. This overstates true protection. Use
+                    # "military_kg_delivery_rate" below for a more honest (though
+                    # still aggregate, not per-order) measure of what fraction of
+                    # committed military kg was actually delivered by simulation end.
+                    "n_military_orders": len(military_orders),
+                    "n_military_filled": military_filled,
+                    "military_fill_rate": (military_filled / len(military_orders)) if military_orders else None,
+                    "total_military_kg_committed": self.total_military_kg_committed,
+                    "military_kg_delivery_rate": (
+                        1.0 - (sum(b["kg"] for b in self.backorder_queue) / self.total_military_kg_committed)
+                        if self.total_military_kg_committed > 0
+                        else None
+                    ),
+                    "n_civilian_orders": len(civilian_orders),
+                    "n_civilian_filled": civilian_filled,
+                    "civilian_fill_rate": (civilian_filled / len(civilian_orders)) if civilian_orders else None,
+                    "shipments_by_channel": dict(self.supply_chain.total_shipments_by_channel),
+                    "failed_deliveries_by_channel": dict(
+                        self.supply_chain.total_failed_deliveries_by_channel
+                    ),
+                    "kg_lost_by_channel": dict(self.supply_chain.total_kg_lost_by_channel),
                 }
             )
 
@@ -256,15 +302,42 @@ class Simulation:
     def _attempt_fill_phase3(self, order, ask: float, price: float) -> tuple[bool, str]:
         """
         Decide how to fill an order the policy has already agreed to price
-        (ask <= willingness_to_pay), in supply-chain mode:
-          1. If physical inventory covers it: immediate sale (as Phase 1/2).
-          2. Else if physical + expected in-transit supply (net of existing
-             commitments) plausibly covers it: accept as a customer
-             commitment (backorder), to be delivered once a shipment arrives.
-          3. Else: place an EMERGENCY order to cover the shortfall and still
-             accept the commitment -- see module docstring, "A deliberate
-             Phase 3 simplification," for why this project does not model
-             the dealer ever declining a priced order in Phase 3.
+        (ask <= willingness_to_pay), in supply-chain mode. As of the
+        military/civilian addendum (register Section 10), this now branches
+        on `order.military_linked`:
+
+          1. If physical inventory covers it: immediate sale, either channel
+             (physical stock is fungible once delivered -- see below).
+          2. Else if CIVILIAN: LOST SALE. Register Section 10, "Unfilled
+             order treatment": civilian orders that can't be filled from
+             physical stock are rejected, matching Phase 1/2 behavior
+             exactly -- civilian demand is treated as discretionary spot
+             demand that walks away, not a standing commitment.
+          3. Else (MILITARY-LINKED): accept as a customer commitment
+             (backorder) if physical + expected pipeline (net of existing
+             commitments) plausibly covers it -- gallium is fungible once
+             delivered, so ANY pending shipment (civilian or military
+             channel) counts toward this check, not just military-channel
+             ones. If the pipeline can't cover it, place an EMERGENCY order
+             specifically through the MILITARY channel (lower reliability,
+             register Section 10) to close the gap, then accept the
+             commitment anyway -- this project does not model the dealer
+             ever declining a military-linked order it already agreed to
+             price (see "A deliberate Phase 3 simplification" in the module
+             docstring; that simplification now applies only to the
+             military-linked branch, not civilian).
+
+        WHY EMERGENCY MILITARY-SHORTFALL COVERAGE USES THE MILITARY CHANNEL
+        -------------------------------------------------------------------------
+        A shipment procured specifically to fulfill a military-linked
+        commitment is itself plausibly subject to the same military-end-use
+        export-control scrutiny (phase0_research_notes.md, Section 2) as the
+        underlying customer demand -- so it is resolved against the lower
+        military-channel reliability, not the civilian default. This is the
+        mechanism that makes the military/civilian distinction actually bite
+        analytically: the supply route the dealer is forced to use to
+        protect military-linked commitments is itself less reliable than its
+        ordinary civilian restocking.
         """
         book = self.book
         size = order.size_kg
@@ -273,29 +346,37 @@ class Simulation:
             filled = book.record_sale(size, ask)
             return filled, ("immediate" if filled else "rejected")
 
+        if not order.military_linked:
+            # Register Section 10: civilian unfilled orders are lost sales.
+            book.failed_sales += 1
+            return False, "rejected"
+
         pipeline_available = (
             book.tranches.physical_kg + self.supply_chain.expected_kg() - book.tranches.committed_kg
         )
         if pipeline_available >= size:
             book.reserve_commitment(size)
-            self.backorder_queue.append({"kg": size, "price": ask})
+            self.backorder_queue.append({"kg": size, "price": ask, "military_linked": True})
+            self.total_military_kg_committed += size
             return True, "backordered"
 
-        # Not enough even in the pipeline: place an emergency order to cover
-        # the shortfall, then accept the commitment anyway (see docstring).
+        # Not enough even in the combined pipeline: place an emergency order,
+        # specifically through the MILITARY channel (see docstring), to cover
+        # the shortfall, then accept the commitment anyway.
         shortfall = max(0.0, size - max(0.0, pipeline_available))
         if shortfall > 0:
             markup = self.supply_chain.replacement_markup_frac(
                 book.available_kg(), self.book.p.safety_stock_kg
             ) * self.supply_chain.p.emergency_cost_multiplier
             unit_cost = price * (1.0 + markup)
-            shipment = self.supply_chain.place_order(shortfall, emergency=True)
+            shipment = self.supply_chain.place_order(shortfall, emergency=True, channel="military")
             shipment.unit_cost_locked = unit_cost
             book.pay_for_supply_order(shortfall, unit_cost)
             self.stockout_events += 1
 
         book.reserve_commitment(size)
-        self.backorder_queue.append({"kg": size, "price": ask})
+        self.backorder_queue.append({"kg": size, "price": ask, "military_linked": True})
+        self.total_military_kg_committed += size
         return True, "emergency_backordered"
 
     def _run_supply_chain_day(self, price: float) -> None:
@@ -368,9 +449,22 @@ class Simulation:
             )
             unit_cost = price * (1.0 + markup)
             order_kg = book.p.restock_amount_kg
-            shipment = self.supply_chain.place_order(order_kg, emergency=False)
+            # Normal (non-emergency) restocking routes through the CIVILIAN
+            # channel -- it is ordinary commercial replenishment, not
+            # procurement specifically to cover a military-linked shortfall
+            # (see _attempt_fill_phase3's docstring for the emergency case).
+            shipment = self.supply_chain.place_order(order_kg, emergency=False, channel="civilian")
             shipment.unit_cost_locked = unit_cost
             book.pay_for_supply_order(order_kg, unit_cost)
+
+        # (Addendum, register Section 10) Accrue the daily backlog penalty on
+        # every military-linked commitment still outstanding at day's end,
+        # valued against the price locked in when each backorder was accepted.
+        if self.backorder_queue:
+            total_backlog_value = sum(b["kg"] * b["price"] for b in self.backorder_queue)
+            penalty = total_backlog_value * self.supply_chain.p.backlog_penalty_frac_per_day
+            if penalty > 0:
+                book.record_backlog_penalty(penalty)
 
     def _reorder_point_kg(self) -> float:
         """

@@ -71,35 +71,40 @@ This is deliberately continuous with Phase 1/2's flat `restock_markup_frac`
 rather than a wholly separate mechanism -- Phase 3 sharpens Phase 1/2's flat
 assumption, it doesn't discard it.
 
-WHAT THIS MODULE DELIBERATELY DOES NOT DO (a real, flagged gap)
+WHAT THIS MODULE DELIBERATELY DID NOT DO, UNTIL NOW (addendum)
 --------------------------------------------------------------------
 The roadmap's Phase 3 "Add Supply-Chain Mechanics" list also calls for
 "channel-dependent shipment reliability" -- separate civilian and
-military-linked reliability tracks. THIS IS NOT IMPLEMENTED HERE. Every
-parameter in this project is required to have a prior row in
-docs/assumptions_register.md before it appears in code (that rule was
-violated once already, in Phase 1, and corrected -- see the register's
-Section 7 "Known deviations"). The current register has no military-linked
-demand or channel-reliability rows at all (Sections 1-6, as delivered by
-Phase 0, are civilian/aggregate-only). Building a military/civilian
-reliability split now would repeat exactly the mistake Phase 1 made and then
-fixed. This is logged as an explicit, deferred gap in
-docs/assumptions_register.md, Section 9, to be resolved with a proper
-register addendum before or during Phase 4 (which needs
-`military_linked_share` and sector structure anyway) -- not smuggled into
-Phase 3 without documentation.
+military-linked reliability tracks. This was NOT implemented in the initial
+Phase 3 pass, because the register had no military-linked demand or
+channel-reliability rows at all, and building it without those rows would
+have repeated the exact mistake Phase 1 made (symmetric jump sizes with no
+register backing) and then corrected.
+
+It IS implemented now: docs/assumptions_register.md, Section 10 (added as an
+addendum ahead of Phase 4) gives `reliability` (renamed conceptually to the
+CIVILIAN-channel reliability, unchanged in value) and a new
+`reliability_military` figure (civilian minus a registered discount).
+`place_order()` now takes a `channel` argument ("civilian" or "military")
+and resolves each shipment against ITS channel's reliability. See
+`SupplyChainParams.reliability_military` below for the exact value and its
+register justification.
 
 LIMITATIONS (explicit, not hidden)
 -----------------------------------
 - Delivery resolution is all-or-mostly-at-once at the end of the lead time,
   not progressive (no shipment arrives "10% today, 20% tomorrow").
-- `reliability` is a single Normal-regime constant reused from the register's
-  existing "Normal-regime shipment reliability" row; regime-dependent
-  reliability (Delayed/Severe/Recovery) is explicitly Phase 4's job -- this
-  module never varies reliability over time on its own.
+- `reliability` (civilian) and `reliability_military` are single Normal-
+  regime constants; regime-dependent reliability (Delayed/Severe/Recovery)
+  is explicitly Phase 4's job -- this module never varies reliability over
+  time on its own.
 - The failure-branch delivered-fraction distribution (Uniform over a fixed
-  range) is a judgment call, not fitted to any real failure-rate data.
-- No channel-dependent (military/civilian) reliability -- see above.
+  range) is a judgment call, not fitted to any real failure-rate data, and
+  is currently shared by both channels (no separate failure-severity
+  distribution per channel yet).
+- The military-linked demand share and reliability discount are aggregate,
+  pre-sector placeholders (register Section 10) -- not the full per-sector
+  Phase 4 design.
 
 WHAT BREAKS IF THIS MODULE IS REMOVED
 --------------------------------------
@@ -107,6 +112,9 @@ Without it, Phase 3's whole point disappears: there would be no gap between
 "ordered" and "arrived" inventory, no meaningful Expected vs. Physical
 inventory distinction, and restocking would fall back to Phase 1's
 instant, zero-failure stub -- exactly what Phase 3 exists to replace.
+Without the channel split specifically, there is no way to observe or
+protect a difference between civilian and military-linked supply risk --
+this project's second core research question has nothing to measure.
 """
 
 from dataclasses import dataclass, field
@@ -118,8 +126,14 @@ class SupplyChainParams:
     lead_time_days: int = 14                  # register §3 "Shipment lead time (Normal)" --
                                                 # judgment call, "days to low weeks"
     reliability: float = 0.95                  # register §2 "Normal-regime shipment
-                                                # reliability" -- reused here since Phase 4's
-                                                # regime switch does not exist yet
+                                                # reliability" -- CIVILIAN channel (reused
+                                                # here since Phase 4's regime switch does
+                                                # not exist yet)
+    reliability_military: float = 0.75         # register §10 "Military-channel reliability
+                                                # discount": civilian (0.95) minus 20
+                                                # percentage points -- scenario assumption
+                                                # informed by the real 2024-2025
+                                                # export-control structure
     partial_failure_min_frac: float = 0.0      # judgment call: on failure, delivered
     partial_failure_max_frac: float = 0.5      # fraction ~ Uniform(min, max); no fitted
                                                 # failure-severity data exists
@@ -131,6 +145,17 @@ class SupplyChainParams:
     replacement_cost_curvature: float = 2.0     # register §3 "Replacement-cost curvature
                                                 # parameter" -- judgment call, convexity
                                                 # magnitude
+    backlog_penalty_frac_per_day: float = 0.005  # (addendum) register §10 "Backlog penalty
+                                                # cost": 0.5% of order value per day a
+                                                # military-linked backorder remains outstanding
+
+    def reliability_for(self, channel: str) -> float:
+        """Returns the reliability figure for the given channel ('civilian'
+        or 'military'). Central lookup so the two channels can never
+        silently drift out of sync with how a Shipment was actually resolved."""
+        if channel == "military":
+            return self.reliability_military
+        return self.reliability
 
 
 @dataclass
@@ -139,6 +164,7 @@ class Shipment:
     kg_ordered: float
     days_remaining: int
     reliability: float
+    channel: str = "civilian"      # (addendum) "civilian" or "military" -- register §10
     emergency: bool = False
     resolved: bool = False
     delivered_kg: float = 0.0
@@ -162,21 +188,29 @@ class SupplyChain:
         self.total_emergency_orders = 0
         self.total_failed_deliveries = 0    # deliveries that arrived below 100% of ordered
         self.total_kg_lost_to_failure = 0.0
+        # (addendum) channel-specific counters, register Section 10
+        self.total_shipments_by_channel = {"civilian": 0, "military": 0}
+        self.total_failed_deliveries_by_channel = {"civilian": 0, "military": 0}
+        self.total_kg_lost_by_channel = {"civilian": 0.0, "military": 0.0}
 
-    def place_order(self, kg: float, emergency: bool = False) -> Shipment:
+    def place_order(self, kg: float, emergency: bool = False, channel: str = "civilian") -> Shipment:
         if kg <= 0:
             raise ValueError("order quantity must be positive")
+        if channel not in ("civilian", "military"):
+            raise ValueError("channel must be 'civilian' or 'military'")
         lead_time = self.p.emergency_lead_time_days if emergency else self.p.lead_time_days
         shipment = Shipment(
             shipment_id=self._next_id,
             kg_ordered=kg,
             days_remaining=lead_time,
-            reliability=self.p.reliability,
+            reliability=self.p.reliability_for(channel),
+            channel=channel,
             emergency=emergency,
         )
         self._next_id += 1
         self.pending.append(shipment)
         self.total_shipments_placed += 1
+        self.total_shipments_by_channel[channel] += 1
         if emergency:
             self.total_emergency_orders += 1
         return shipment
@@ -202,6 +236,8 @@ class SupplyChain:
                     s.delivered_kg = s.kg_ordered * frac
                     self.total_failed_deliveries += 1
                     self.total_kg_lost_to_failure += s.kg_ordered - s.delivered_kg
+                    self.total_failed_deliveries_by_channel[s.channel] += 1
+                    self.total_kg_lost_by_channel[s.channel] += s.kg_ordered - s.delivered_kg
                 s.resolved = True
                 resolved_now.append(s)
             else:
@@ -209,26 +245,33 @@ class SupplyChain:
         self.pending = still_pending
         return resolved_now
 
-    def in_transit_kg(self) -> float:
+    def in_transit_kg(self, channel: str | None = None) -> float:
         """
         Register Section 3, "In-Transit Inventory": gallium ordered and
         shipped but not yet arrived. Every pending shipment contributes its
         FULL ordered quantity (none of it counts as arrived until the
         shipment resolves at the end of its lead time -- see module
-        docstring, "Limitations").
+        docstring, "Limitations"). Pass channel="civilian" or "military"
+        (addendum) to restrict to one channel; omit for the combined total.
         """
-        return sum(s.kg_ordered for s in self.pending)
+        return sum(s.kg_ordered for s in self.pending if channel is None or s.channel == channel)
 
-    def expected_kg(self) -> float:
+    def expected_kg(self, channel: str | None = None) -> float:
         """
         Register Section 3, "Expected Inventory": probability-adjusted
         future supply. Uses each shipment's EX-ANTE reliability (the known
         probability parameter), not the as-yet-unresolved random outcome --
         e.g. a 200 kg shipment at 50% reliability contributes 100 kg here,
         matching the register's own worked example, regardless of what that
-        shipment eventually actually delivers.
+        shipment eventually actually delivers. Pass channel="civilian" or
+        "military" (addendum) to restrict to one channel; omit for the
+        combined total.
         """
-        return sum(s.kg_ordered * s.reliability for s in self.pending)
+        return sum(
+            s.kg_ordered * s.reliability
+            for s in self.pending
+            if channel is None or s.channel == channel
+        )
 
     def replacement_markup_frac(self, available_kg: float, safety_stock_kg: float) -> float:
         """

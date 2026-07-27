@@ -65,6 +65,7 @@ model code existed, is in
 | 1 | Simulation core (price process, Poisson demand, accounting, fixed-spread baseline) | ✅ Complete |
 | 2 | Standard Avellaneda–Stoikov reproduction | ✅ Complete |
 | 3 | Physical / committed / in-transit / expected inventory separation | ✅ Complete |
+| — | Addendum: military/civilian demand channel (pre-Phase 4, aggregate) | ✅ Complete |
 | 4 | Markov regimes and Hawkes demand | ⏳ Not started |
 | 5 | Scarcity-adjusted market-making policy | ⏳ Not started |
 | 6 | Dynamic-programming policy | ⏳ Not started |
@@ -79,9 +80,10 @@ model code existed, is in
 - [`docs/assumptions_register.md`](docs/assumptions_register.md) — every parameter, its
   value, its meaning, its source type, its justification, and its expected sensitivity.
   Section 7 logs Phase 1's concrete values; Section 8 logs Phase 2's; Section 9 logs
-  Phase 3's, including two real bugs found during integration testing and a deliberately
-  deferred roadmap item (military/civilian channel reliability) — worth reading before
-  trusting any Phase 3 number.
+  Phase 3's, including two real bugs found during integration testing; Section 10 is the
+  military/civilian addendum, including a methodological caveat about what
+  "military_fill_rate" does and doesn't measure — read before trusting any headline
+  military-vs-civilian number.
 - [`docs/README_honesty_paragraph.md`](docs/README_honesty_paragraph.md) — the full
   honesty statement and why it was written before any model code.
 - [`docs/phase0_research_notes.md`](docs/phase0_research_notes.md) — the public research
@@ -408,8 +410,8 @@ committed inventory over one simulated year (Normal-regime reliability, 95%), pl
 available inventory (which dips toward but rarely below zero at this calibration).
 
 `results/figures/phase3_stressed_supply_chain.png` — the same setup with reliability
-dropped to 50%: 11 failed deliveries, ~1,350 kg lost out of ~2,700 kg ordered, and a
-clearly negative mark-to-market P&L (~-$427,000) — a directional sanity check standing in
+dropped to 50%/30% (civilian/military): 12 failed deliveries, ~1,445 kg lost, and a
+clearly negative mark-to-market P&L (~-$446,000) — a directional sanity check standing in
 for a backtest: worse reliability should make the dealer worse off, and now visibly does.
 
 ### Two real bugs found and fixed during integration testing (not just documented — fixed)
@@ -456,6 +458,89 @@ conflation this phase's mastery checkpoint exists to catch.
 
 ---
 
+## Addendum — Military/Civilian Demand Channel (pre-Phase 4)
+
+Added retroactively to unblock Phase 3's own "channel-dependent shipment reliability"
+build item, which the initial Phase 3 pass correctly deferred for lack of register
+support. This is a **simplified, aggregate, pre-sector** version of the roadmap's full
+military/civilian design — real per-sector shares, Hawkes demand, and price-sensitivity
+differences are still Phase 4's job. See `docs/assumptions_register.md`, Section 10, for
+the full register rows and scope notes.
+
+### What's new
+
+| Module | What changed |
+|---|---|
+| `src/demand.py` | Every order is independently tagged `military_linked` via a per-order Bernoulli draw at `military_linked_share` (default 15%, aggregate) |
+| `src/supply_chain.py` | Shipments now carry a `channel` ("civilian"/"military"); each channel has its own reliability (95% / 75% by default — a registered -20pp discount) |
+| `src/simulation.py` | **Behavior change**: civilian orders that can't be filled from physical stock are now **lost sales** (matching Phase 1/2); only military-linked orders roll into a committed backlog, with emergency shortfall coverage routed specifically through the (less reliable) military channel |
+| `src/accounting.py` | New `record_backlog_penalty()` — a daily holding-cost-equivalent penalty (0.5% of order value/day) accrued while a military-linked backorder sits unfulfilled |
+
+### Why civilian orders are lost sales but military ones aren't
+
+This mirrors the real asymmetry the register cites: military-linked demand more
+plausibly represents standing contracts (procurement cycles) than walk-away spot demand.
+Modeling both identically would erase the exact distinction this project's second core
+research question depends on.
+
+### A methodological catch, found while building the headline comparison — worth reading before trusting any number here
+
+The first version of `military_fill_rate` measured whether an order was *accepted*
+(backordered or emergency-covered), not whether it was ever actually *delivered*. Because
+this project never lets a military commitment go permanently unfulfilled, that number
+stayed flat regardless of supply reliability — it didn't show the protection mechanism
+doing anything. A second metric, `military_kg_delivery_rate`, was added and also
+converged to ~100% at a 252-day horizon (the backlog always eventually clears, given
+enough emergency reordering). Neither metric alone tells the story.
+
+**What actually differentiates supply-chain stress levels is the *cost* of guaranteeing
+that eventual 100% delivery** — verified across 50 matched seeds at three reliability
+levels:
+
+| Scenario | Civilian fill rate | Military delivery rate | Mean backlog penalty | Mean mark-to-market P&L |
+|---|---|---|---|---|
+| Normal (95%/75%) | 19.8% | 100% | $341 | -$165,007 |
+| Delayed (60%/40%) | 19.7% | 100% | $379 | -$403,979 |
+| Severe (25%/10%) | 18.9% | 100% | $496 | -$862,122 |
+
+Civilian fill rate degrades only mildly (orders are simply lost, no queue to wait in).
+Military delivery is always eventually guaranteed at these parameters — this project's
+"never permanently decline a military commitment" simplification bites here. The
+economically real result is that guaranteeing it costs monotonically more as the supply
+chain degrades: a small, honestly-scoped first data point toward this project's second
+core research question ("what does protecting military-critical supply cost in dealer
+P&L?"), well short of Phase 5's full scarcity-adjusted policy comparison, but real and
+verified rather than assumed.
+
+See `results/figures/phase3_military_vs_civilian_fill_rate.png` for the chart, and
+`docs/assumptions_register.md`, Section 10, for the exact stress-test parameters (more
+extreme than this addendum's own defaults — the default calibration's reorder-point logic
+over-provisions so heavily that scarcity barely ever binds; see Section 9's
+over-accumulation note).
+
+### Tests
+
+19 new tests in `tests/test_military_addendum.py`, plus updates to two Phase 3 tests
+whose old assumptions ("every order eventually fills") no longer hold now that civilian
+orders can be rejected. Includes controlled, deterministic tests of the fill-decision
+logic (manipulating book state directly) rather than relying on a long stochastic run to
+organically produce scarcity — which, per the finding above, it mostly doesn't at default
+parameters.
+
+### Explicit limitations (Core Rule test)
+
+- Aggregate, pre-sector military share — not Phase 4's real per-sector design.
+- No price-sensitivity difference between channels yet (register Section 10 flags this
+  explicitly as the gap that makes "does pricing alone protect military supply" an open
+  question rather than a foregone conclusion).
+- The dealer never permanently declines a military commitment — a real, flagged
+  simplification, not a finding about real dealer behavior.
+- `military_fill_rate` means "accepted," not "delivered" — use
+  `military_kg_delivery_rate` and the backlog-penalty/P&L figures for anything claiming
+  to measure actual protection.
+
+---
+
 ## Repository structure (current)
 
 ```
@@ -488,14 +573,16 @@ GaMM-RX/
 │   ├── test_avellaneda_stoikov.py
 │   ├── test_inventory_heuristic.py
 │   ├── test_phase2_comparison.py
-│   └── test_phase3_integration.py
+│   ├── test_phase3_integration.py
+│   └── test_military_addendum.py
 └── results/
     └── figures/
         ├── phase1_demo_run.png
         ├── phase2_as_diagnostics.png
         ├── phase2_pnl_distribution_preview.png
         ├── phase3_inventory_tranches.png
-        └── phase3_stressed_supply_chain.png
+        ├── phase3_stressed_supply_chain.png
+        └── phase3_military_vs_civilian_fill_rate.png
 ```
 
 Modules planned by the full roadmap (`regimes.py`, `scarcity_adjusted_as.py`,
@@ -509,15 +596,19 @@ they are listed in the project roadmap as future work, not represented here as f
   scarcity-adjusted policy, dynamic programming, sector stress testing, matched Monte
   Carlo with confidence intervals, ablation/sensitivity analysis, and qualitative
   historical validation.
-- Channel-dependent (military/civilian) shipment reliability — deliberately deferred from
-  Phase 3 pending a register addendum (see Phase 3 section above); likely bundled with
-  Phase 4's sector work, which needs `military_linked_share` anyway.
-- A dealer that can decline a priced order rather than always finding a way to fill it
-  (Phase 3's current, flagged simplification).
+- Phase 4's real per-sector military-linked shares and price-sensitivity difference
+  between channels — the pre-Phase 4 addendum (aggregate, single share, no elasticity
+  difference) is a placeholder, not the full design.
+- A dealer that can permanently decline a military-linked commitment rather than always
+  eventually fulfilling it (the addendum's current, flagged simplification — see the
+  100%-eventual-delivery finding).
+- A per-order (not just aggregate) military delivery-confirmation metric — the current
+  `military_kg_delivery_rate` is an aggregate approximation, not tracked per order.
 - Progressive (rather than all-at-once) shipment delivery.
 - Phase 9's planned sweep of `γ` and `k` (Phase 2) — needed before the "AS underperforms
   at this calibration" finding can be read as anything more than a single-point
-  observation.
+  observation. The addendum's own military-share/reliability-discount figures need the
+  same treatment.
 - A genuine customer-facing bid (currently `bid_markup_frac`/`restock_markup_frac` are
   supplier procurement-premium stand-ins) once customer sell-side flow exists.
 - A smoother (non-threshold) fill-probability function for customer orders.

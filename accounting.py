@@ -136,6 +136,9 @@ class DealerBook:
         self.cumulative_lost_delivery_cost = 0.0  # (Phase 3) cash paid for kg that was
                                             # ordered and paid for but never arrived --
                                             # see record_lost_delivery_cost() below
+        self.cumulative_backlog_penalty = 0.0  # (addendum) register §10 "Backlog penalty
+                                            # cost" -- accrued daily while a military-linked
+                                            # backorder remains outstanding
         self.avg_cost_basis = 0.0   # running weighted-average cost per kg of held inventory
         self.restock_events = 0
         self.failed_sales = 0       # orders rejected due to insufficient inventory
@@ -299,16 +302,37 @@ class DealerBook:
             raise ValueError("lost delivery cost must be non-negative")
         self.cumulative_lost_delivery_cost += cost
 
+    def record_backlog_penalty(self, cost: float) -> None:
+        """
+        (Addendum, register Section 10) Recognize the daily holding-cost-
+        equivalent penalty for a military-linked backorder that remains
+        unfulfilled. Debits cash directly (this is a genuine daily cost of
+        carrying the liability, not a bookkeeping reallocation like
+        record_lost_delivery_cost) and is tracked separately so it shows up
+        distinctly in reporting, not blended into replacement cost or COGS.
+        """
+        if cost < 0:
+            raise ValueError("backlog penalty must be non-negative")
+        self.cash -= cost
+        self.cumulative_backlog_penalty += cost
+
     # ---- P&L / reporting --------------------------------------------------
 
     def realized_pnl(self) -> float:
         """Cash-basis P&L: revenue - cost of goods sold - (Phase 3) sunk cost
-        of paid-for kg that never arrived. Ordinary replacement cost is
-        already reflected through COGS at the point of sale (weighted-average
-        cost basis), so it is not subtracted a second time here -- only the
-        LOST portion (never delivered, so never eligible to be sold) is
-        subtracted directly, since it can never flow through COGS."""
-        return self.cumulative_revenue - self.cumulative_cogs - self.cumulative_lost_delivery_cost
+        of paid-for kg that never arrived - (addendum) accrued military
+        backlog penalty. Ordinary replacement cost is already reflected
+        through COGS at the point of sale (weighted-average cost basis), so
+        it is not subtracted a second time here -- only the LOST portion
+        (never delivered, so never eligible to be sold) and the backlog
+        penalty are subtracted directly, since neither can ever flow through
+        COGS."""
+        return (
+            self.cumulative_revenue
+            - self.cumulative_cogs
+            - self.cumulative_lost_delivery_cost
+            - self.cumulative_backlog_penalty
+        )
 
     def mark_to_market_pnl(self, current_price: float) -> float:
         """Realized P&L plus unrealized gain/loss on remaining inventory,
@@ -339,6 +363,8 @@ class DealerBook:
             "terminal_wealth": self.terminal_wealth(price),
             "restock_events": self.restock_events,
             "failed_sales": self.failed_sales,
+            "cumulative_lost_delivery_cost": self.cumulative_lost_delivery_cost,
+            "cumulative_backlog_penalty": self.cumulative_backlog_penalty,
         }
         self.history.append(row)
         return row
