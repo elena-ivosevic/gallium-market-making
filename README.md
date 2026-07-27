@@ -64,7 +64,7 @@ model code existed, is in
 | 0 | Research, assumptions register, honesty paragraph | ✅ Complete |
 | 1 | Simulation core (price process, Poisson demand, accounting, fixed-spread baseline) | ✅ Complete |
 | 2 | Standard Avellaneda–Stoikov reproduction | ✅ Complete |
-| 3 | Physical / committed / in-transit / expected inventory separation | ⏳ Not started |
+| 3 | Physical / committed / in-transit / expected inventory separation | ✅ Complete |
 | 4 | Markov regimes and Hawkes demand | ⏳ Not started |
 | 5 | Scarcity-adjusted market-making policy | ⏳ Not started |
 | 6 | Dynamic-programming policy | ⏳ Not started |
@@ -78,9 +78,10 @@ model code existed, is in
 
 - [`docs/assumptions_register.md`](docs/assumptions_register.md) — every parameter, its
   value, its meaning, its source type, its justification, and its expected sensitivity.
-  Section 7 logs Phase 1's concrete numeric values; Section 8 logs Phase 2's
-  (Avellaneda-Stoikov and the inventory heuristic), including a calibration-dependent
-  finding worth reading before trusting any Phase 2 P&L comparison.
+  Section 7 logs Phase 1's concrete values; Section 8 logs Phase 2's; Section 9 logs
+  Phase 3's, including two real bugs found during integration testing and a deliberately
+  deferred roadmap item (military/civilian channel reliability) — worth reading before
+  trusting any Phase 3 number.
 - [`docs/README_honesty_paragraph.md`](docs/README_honesty_paragraph.md) — the full
   honesty statement and why it was written before any model code.
 - [`docs/phase0_research_notes.md`](docs/phase0_research_notes.md) — the public research
@@ -320,6 +321,141 @@ claim that it should, in theory.
 
 ---
 
+## Phase 3 — Physical Supply-Chain Inventory
+
+Phase 3 replaces Phase 1's "instant, zero-failure restock" stub — explicitly flagged at
+the time as scaffolding — with real shipment lead times, partial/failed deliveries,
+customer backorders, and a nonlinear (convex) replacement cost, split across five
+inventory tranches instead of one number.
+
+**Not built:** the roadmap's Phase 3 list also calls for channel-dependent (civilian vs.
+military-linked) shipment reliability. This project's actual register (Sections 1–6) has
+no military-linked demand or channel-reliability rows at all, so building that split now
+would repeat — without correcting — the exact mistake Phase 1 made and fixed (a parameter
+with no register row backing it). It's logged as a deliberate, deferred gap in the
+register, Section 9, not built silently.
+
+### Components built
+
+| Module | What it does | Why it's included | Key limitation |
+|---|---|---|---|
+| `src/supply_chain.py` | Shipment queue with lead times; delivery resolution (full, partial, or failed, per the register's reliability figure); emergency orders (shorter lead time, cost multiplier); nonlinear replacement-cost markup | The gap between "paid for" and "physically available" is Phase 3's entire point — see the mastery checkpoint below | Delivery resolves all-at-once at lead-time end, not progressively; failure-severity distribution is a judgment call, not fitted data |
+| `src/inventory.py` | `InventoryTranches`: physical, committed, available (`= physical - committed - safety_stock`, register §3's own definition) | Prevents double-counting a customer commitment as still-freely-sellable stock | `available_kg()` is deliberately allowed to go negative — a real signal of overextension, not a bug to clip away |
+| `src/accounting.py` (extended) | New: `pay_for_supply_order`, `receive_delivery`, `reserve_commitment`, `deliver_against_commitment`, `record_lost_delivery_cost` | Revenue is recognized at delivery, not at backorder acceptance — standard practice, and it keeps `realized_pnl()` meaning what it says | Phase 1's instant-restock methods remain fully functional, unchanged, for backward compatibility — Phase 3 simulations simply don't call them |
+| `src/simulation.py` (extended) | Opt-in `supply_chain_params` argument; without it, Phase 1/2 behavior is byte-for-byte unchanged | Every one of the 47 pre-existing tests needed to keep passing unmodified — and they do | Never turns away a priced order — always finds a way to fill it (immediately, backordered, or via emergency order) rather than modeling a dealer who sometimes declines; see below |
+
+### Tests
+
+44 new tests across 4 files (91 total, all passing):
+
+```
+tests/test_supply_chain.py         — lead times, reliability, partial/failed delivery,
+                                      expected-vs-physical arithmetic, convex markup
+tests/test_inventory.py            — tranche arithmetic, available_kg, the mastery-
+                                      checkpoint worked example
+tests/test_accounting_phase3.py    — supply-order payment, delivery receipt, commitment
+                                      fulfillment, the lost-delivery-cost fix
+tests/test_phase3_integration.py   — full Simulation runs in supply-chain mode, plus an
+                                      explicit regression test proving Phase 1/2 mode is
+                                      completely unaffected
+```
+
+Run them with `python -m pytest tests/ -v`.
+
+### Mastery checkpoint
+
+**Why is 50% probability of receiving 200 kg not economically equivalent to owning 100 kg
+already in the warehouse?**
+
+Because the two numbers behave completely differently when a quote actually needs to be
+made. The 100 kg-physical case is quotable *right now* — the dealer can promise it to any
+customer at any price and be certain of delivering. The "200 kg at 50%" case isn't 100 kg
+of anything; it's a full 200 kg that either shows up or doesn't, with real probability of
+partial or total failure in between (`src/supply_chain.py`'s partial-failure mechanics).
+Treating it as "as good as 100 kg physical" would let a policy quote as if it had certain
+supply it doesn't have.
+
+**Numerical example** (`tests/test_inventory.py::test_expected_vs_physical_worked_example_from_mastery_checkpoint`):
+
+```
+Case A: 100 kg physical, 0 kg in transit, safety stock = 60 kg
+  available_kg() = 100 - 0 - 60 = 40 kg   -> can freely quote up to 40 kg
+
+Case B: 0 kg physical, 200 kg in transit at 50% reliability, safety stock = 60 kg
+  expected_kg() = 200 × 0.5 = 100 kg      -> looks the same as Case A's "100 kg"
+  available_kg() = 0 - 0 - 60 = -60 kg    -> cannot freely quote ANYTHING; already
+                                              below the safety buffer
+```
+
+Both cases have "100 kg" by the expected-value arithmetic, but `available_kg()` — the
+number a policy should actually price against — differs by 100 kg between them, because
+`available_kg()` only ever reads `physical_kg`, never a supply chain's `expected_kg()`
+(confirmed structurally in `tests/test_phase3_integration.py`).
+
+**Extension (military-channel worked example, not implemented in code — see "Not built"
+above):** if that 200 kg shipment were earmarked for a military-linked commitment with a
+civilian-channel arrival probability of 50% but a military-channel probability of only
+20%, expected inventory for that specific commitment would be `200 × 0.20 = 40 kg`, not
+100 kg — pooling both channels into one reliability number would overstate the expected
+supply available for the military-linked commitment specifically by 60 kg. This is exactly
+the kind of number a channel split would need to get right, and exactly why it isn't being
+built without a register row to back the 20%/50% figures first.
+
+### Demo output
+
+`results/figures/phase3_inventory_tranches.png` — physical, in-transit, expected, and
+committed inventory over one simulated year (Normal-regime reliability, 95%), plus
+available inventory (which dips toward but rarely below zero at this calibration).
+
+`results/figures/phase3_stressed_supply_chain.png` — the same setup with reliability
+dropped to 50%: 11 failed deliveries, ~1,350 kg lost out of ~2,700 kg ordered, and a
+clearly negative mark-to-market P&L (~-$427,000) — a directional sanity check standing in
+for a backtest: worse reliability should make the dealer worse off, and now visibly does.
+
+### Two real bugs found and fixed during integration testing (not just documented — fixed)
+
+Both were caught by actually running the simulation end-to-end and noticing the output was
+economically absurd, not by code inspection:
+
+1. **Unbounded convex replacement cost.** The first version let markup grow without bound
+   for deeply negative available inventory — an early run produced markups over 60,000%
+   and a simulated terminal wealth around **-$5.6 million** on a $50,000 start. Fixed by
+   capping the shortfall ratio at 1.0 (worst case: base markup + full curvature, 203% at
+   current defaults).
+2. **Reorder trigger fired every day of a shortfall**, because it checked `available_kg()`
+   (which ignores shipments already in transit) instead of *inventory position*
+   (physical + in-transit − committed). Fixed with a standard inventory-theory **reorder
+   point** (`safety_stock + lead-time demand`), computed from already-registered
+   quantities — not a new free parameter.
+3. **A related accounting completeness gap:** cash paid for kg that never arrived was
+   debited from cash but never subtracted from `realized_pnl()`/`mark_to_market_pnl()` —
+   only `terminal_wealth()` caught it. Fixed with `record_lost_delivery_cost()`.
+
+All three are logged in `docs/assumptions_register.md`, Section 9, with the before/after
+numbers — not quietly patched.
+
+### Explicit Phase 3 limitations (Core Rule test)
+
+- No channel-dependent (military/civilian) shipment reliability — see "Not built" above.
+- Phase 3 never turns away a priced order (`ask <= willingness_to_pay`) — it always finds a
+  way to fill it, even if that means an emergency order. A real dealer might sometimes
+  decline rather than scramble; modeling that decision needs a register-backed parameter
+  ("how much emergency cost is too much") that doesn't exist yet.
+- The reorder-point formula assumes 100% of generated demand gets filled (a conservative
+  overestimate, since real fill rates run ~20–40% depending on policy), which causes some
+  inventory over-accumulation relative to what's strictly needed.
+- Delivery resolution is all-at-once at the end of the lead time, not progressive.
+- `safety_stock_kg` (Phase 3) and `restock_threshold_kg` (Phase 1's stub trigger) are
+  deliberately separate fields instantiating the same register row at different values, so
+  Phase 1/2 behavior is completely undisturbed by Phase 3's addition.
+
+If Phase 3 were removed: Phase 1's instant, zero-failure restocking would be the only
+restocking mechanism left, and there would be no meaningful difference between "gallium
+that has been paid for" and "gallium that is actually available to sell" — exactly the
+conflation this phase's mastery checkpoint exists to catch.
+
+---
+
 ## Repository structure (current)
 
 ```
@@ -334,6 +470,8 @@ GaMM-RX/
 │   ├── price_process.py
 │   ├── demand.py
 │   ├── accounting.py
+│   ├── inventory.py
+│   ├── supply_chain.py
 │   ├── simulation.py
 │   └── policies/
 │       ├── fixed_spread.py
@@ -343,35 +481,45 @@ GaMM-RX/
 │   ├── test_price_process.py
 │   ├── test_demand.py
 │   ├── test_accounting.py
+│   ├── test_accounting_phase3.py
+│   ├── test_inventory.py
+│   ├── test_supply_chain.py
 │   ├── test_policies.py
 │   ├── test_avellaneda_stoikov.py
 │   ├── test_inventory_heuristic.py
-│   └── test_phase2_comparison.py
+│   ├── test_phase2_comparison.py
+│   └── test_phase3_integration.py
 └── results/
     └── figures/
         ├── phase1_demo_run.png
         ├── phase2_as_diagnostics.png
-        └── phase2_pnl_distribution_preview.png
+        ├── phase2_pnl_distribution_preview.png
+        ├── phase3_inventory_tranches.png
+        └── phase3_stressed_supply_chain.png
 ```
 
-Modules planned by the full roadmap (`regimes.py`, `supply_chain.py`,
-`scarcity_adjusted_as.py`, `dynamic_programming.py`, `optimization.py`, `evaluation.py`,
-`visualization.py`, and the full `notebooks/` tree) do not exist yet and are not implied
-to exist by this README — they are listed in the project roadmap as future work, not
-represented here as finished.
+Modules planned by the full roadmap (`regimes.py`, `scarcity_adjusted_as.py`,
+`dynamic_programming.py`, `optimization.py`, `evaluation.py`, `visualization.py`, and the
+full `notebooks/` tree) do not exist yet and are not implied to exist by this README —
+they are listed in the project roadmap as future work, not represented here as finished.
 
 ## Future Work
 
-- Everything in Phases 3–11 of the roadmap: real supply-chain inventory, regime
-  switching, Hawkes demand, the scarcity-adjusted policy, dynamic programming, sector
-  stress testing, matched Monte Carlo with confidence intervals, ablation/sensitivity
-  analysis, and qualitative historical validation.
-- Phase 9's planned sweep of `γ` and `k` — needed before the Phase 2 "AS underperforms at
-  this calibration" finding can be read as anything more than a single-point observation.
+- Everything in Phases 4–11 of the roadmap: regime switching, Hawkes demand, the
+  scarcity-adjusted policy, dynamic programming, sector stress testing, matched Monte
+  Carlo with confidence intervals, ablation/sensitivity analysis, and qualitative
+  historical validation.
+- Channel-dependent (military/civilian) shipment reliability — deliberately deferred from
+  Phase 3 pending a register addendum (see Phase 3 section above); likely bundled with
+  Phase 4's sector work, which needs `military_linked_share` anyway.
+- A dealer that can decline a priced order rather than always finding a way to fill it
+  (Phase 3's current, flagged simplification).
+- Progressive (rather than all-at-once) shipment delivery.
+- Phase 9's planned sweep of `γ` and `k` (Phase 2) — needed before the "AS underperforms
+  at this calibration" finding can be read as anything more than a single-point
+  observation.
 - A genuine customer-facing bid (currently `bid_markup_frac`/`restock_markup_frac` are
-  supplier procurement-premium stand-ins — see Phase 1/2 limitations above) once customer
-  sell-side flow exists.
-- A smoother (non-threshold) fill-probability function for customer orders, which would
-  also let `k` be fitted to the actual execution model instead of tuned by feel.
+  supplier procurement-premium stand-ins) once customer sell-side flow exists.
+- A smoother (non-threshold) fill-probability function for customer orders.
 - A properly fitted skewed jump-size distribution (currently a biased-coin/half-normal
   approximation of the register's right-skew requirement).

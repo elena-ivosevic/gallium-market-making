@@ -1,0 +1,411 @@
+"""
+simulation.py
+=============
+
+Phase 1 deliverable (extended in Phase 2, extended again in Phase 3): the
+loop that ties price_process + demand + accounting + a policy together into
+a single run.
+
+WHAT ONE STEP DOES (Phase 1/2 mode -- the DEFAULT, unchanged)
+------------------------------------------------------------------
+1. Advance the price process by one dt -> new mid price.
+2. Generate zero or more customer orders for this dt (Poisson).
+3. Ask the policy for its current ask quote, passing mid price, inventory,
+   cost basis, elapsed/remaining time (t, T, in years), and the price
+   process's fractional volatility (sigma) -- policies use whatever subset
+   of this they need.
+4. Match each customer order against that quote; execute fills against the
+   dealer's book (accounting). Insufficient physical inventory = lost sale.
+5. Apply the Phase 1 minimal auto-restock rule if inventory is low, using
+   the policy's own `restock_markup_frac()`.
+6. Snapshot the dealer's state, and record any policy `last_diagnostics`.
+
+WHAT'S DIFFERENT IN PHASE 3 SUPPLY-CHAIN MODE (opt-in via `supply_chain_params`)
+------------------------------------------------------------------------------------
+Passing a `SupplyChainParams` to the constructor switches steps 4-5 to a
+different path, described in `_attempt_fill_phase3` and
+`_run_supply_chain_day` below. In short:
+  - An order that can't be filled from physical stock alone is accepted as a
+    CUSTOMER COMMITMENT (backorder) if existing in-transit shipments'
+    expected contribution can plausibly cover it, or triggers an EMERGENCY
+    order (faster, costlier) if not -- rather than being an automatic lost
+    sale. See "A deliberate Phase 3 simplification" below for why this is a
+    real, flagged assumption, not free lunch.
+  - Restocking is no longer instant: new orders enter a shipment queue with
+    a lead time (src/supply_chain.py) and a chance of partial/failed
+    delivery, resolved day by day via `SupplyChain.advance_day()`.
+  - Every day's tranche state (physical / committed / in-transit / expected /
+    available inventory) is recorded in `policy_diagnostics`-style history
+    (`self.tranche_history`) for later analysis.
+
+Phase 1/2 usage (no `supply_chain_params` argument) is COMPLETELY UNCHANGED
+-- every existing test that constructs a `Simulation` without this argument
+exercises the exact same code path as before Phase 3 existed.
+
+A DELIBERATE PHASE 3 SIMPLIFICATION (explicit, not hidden)
+----------------------------------------------------------------
+Phase 3's fill logic never turns away an order the policy already agreed to
+price (`ask <= willingness_to_pay`): if physical and expected supply can't
+cover it, the simulation places an EMERGENCY order rather than reject the
+sale outright. This means `failed_sales` should rarely if ever increment in
+Phase 3 mode -- a real dealer might sometimes decline rather than scramble,
+but modeling that decision is deferred (there's no register-backed parameter
+yet for "how much emergency cost is too much to bear," and adding one without
+a row would repeat the exact mistake Phase 1 made and corrected). This is
+logged in docs/assumptions_register.md, Section 9.
+
+WHY THIS STRUCTURE
+-------------------
+Every later, more sophisticated policy (Avellaneda-Stoikov, scarcity-adjusted,
+DP) plugs into the exact same loop by implementing the same `quote_ask` /
+`restock_markup_frac` interface. This is what makes the Phase 8 "matched
+Monte Carlo" possible: the same price path, the same customer arrivals, and
+the same random seeds can be replayed against different policies, because
+none of that generation logic lives inside the policy itself. The generic
+`last_diagnostics` hook (Phase 2) means the simulation loop never needs an
+`if isinstance(policy, AvellanedaStoikovPolicy)` branch -- any current or
+future policy can expose whatever internal state is worth plotting later.
+
+LIMITATIONS (explicit, not hidden)
+-----------------------------------
+- Single commodity, single dealer, no competitors.
+- No sector structure, no regimes, no Hawkes clustering (Phase 4).
+- Time step is daily; intraday dynamics are not modeled.
+- `T` (trading horizon, years) is simply `n_steps * dt` -- i.e., the
+  simulation's own length. This is the natural choice for reproducing
+  Avellaneda-Stoikov's finite-horizon assumption, but it means the "horizon"
+  isn't derived from any real dealer planning cycle -- register Section 5,
+  "Trading horizon length" row.
+- Phase 3's emergency-order-always-covers-it assumption (see above).
+- No channel-dependent (military/civilian) shipment reliability -- see
+  src/supply_chain.py's module docstring for why this roadmap item is
+  deliberately NOT implemented yet.
+
+WHAT BREAKS IF THIS MODULE IS REMOVED
+--------------------------------------
+Nothing else runs -- this is the orchestrator. Without it you have isolated,
+individually-testable components but no actual simulation.
+"""
+
+from dataclasses import dataclass, field
+import numpy as np
+
+from src.price_process import GalliumPriceProcess, PriceProcessParams
+from src.demand import PoissonOrderFlow, DemandParams
+from src.accounting import DealerBook, AccountingParams
+from src.supply_chain import SupplyChain, SupplyChainParams
+
+
+@dataclass
+class SimulationConfig:
+    n_steps: int = 252  # one trading year at daily steps
+    seed: int | None = 42
+
+
+class Simulation:
+    def __init__(
+        self,
+        policy,
+        price_params: PriceProcessParams = None,
+        demand_params: DemandParams = None,
+        accounting_params: AccountingParams = None,
+        config: SimulationConfig = None,
+        supply_chain_params: SupplyChainParams = None,
+    ):
+        self.policy = policy
+        self.config = config or SimulationConfig()
+
+        rng_seed = self.config.seed
+        self.price_process = GalliumPriceProcess(
+            price_params or PriceProcessParams(), seed=rng_seed
+        )
+        # Use a distinct but deterministic sub-seed for demand so that price
+        # and demand randomness can be independently re-seeded if needed.
+        demand_seed = None if rng_seed is None else rng_seed + 1
+        self.order_flow = PoissonOrderFlow(demand_params or DemandParams(), seed=demand_seed)
+        self.book = DealerBook(accounting_params or AccountingParams())
+
+        # Phase 3: supply-chain mode is entirely opt-in. If no
+        # supply_chain_params is given, self.supply_chain stays None and
+        # run() takes the exact Phase 1/2 code path, unchanged.
+        supply_chain_seed = None if rng_seed is None else rng_seed + 2
+        self.supply_chain = (
+            SupplyChain(supply_chain_params, seed=supply_chain_seed)
+            if supply_chain_params is not None
+            else None
+        )
+        self.backorder_queue: list[dict] = []  # only used in Phase 3 mode
+        self.tranche_history: list[dict] = []  # only populated in Phase 3 mode
+        self.stockout_events = 0               # only incremented in Phase 3 mode
+
+        self.order_log: list[dict] = []
+        self.policy_diagnostics: list[dict] = []
+
+    def run(self) -> dict:
+        dt = self.price_process.p.dt
+        horizon_years = self.config.n_steps * dt
+        sigma_frac = self.price_process.p.sigma
+
+        for t in range(self.config.n_steps):
+            price = self.price_process.step()
+
+            orders = self.order_flow.generate_orders(mid_price=price)
+            ask = self.policy.quote_ask(
+                mid_price=price,
+                inventory_kg=self.book.inventory_kg,
+                avg_cost_basis=self.book.avg_cost_basis,
+                t=t * dt,
+                T=horizon_years,
+                sigma=sigma_frac,
+            )
+
+            for order in orders:
+                want_fill = ask <= order.willingness_to_pay
+                fill_type = "rejected"
+                filled = False
+                if want_fill:
+                    if self.supply_chain is None:
+                        # Phase 1/2 path, unchanged: insufficient physical
+                        # inventory simply loses the sale.
+                        filled = self.book.record_sale(order.size_kg, ask)
+                        fill_type = "immediate" if filled else "rejected"
+                    else:
+                        filled, fill_type = self._attempt_fill_phase3(order, ask, price)
+
+                self.order_log.append(
+                    {
+                        "t": t,
+                        "price": price,
+                        "ask": ask,
+                        "size_kg": order.size_kg,
+                        "willingness_to_pay": order.willingness_to_pay,
+                        "filled": filled,
+                        "fill_type": fill_type,
+                    }
+                )
+
+            if self.supply_chain is None:
+                # Phase 1/2 path, unchanged.
+                markup_frac = self.policy.restock_markup_frac(
+                    inventory_kg=self.book.inventory_kg,
+                    avg_cost_basis=self.book.avg_cost_basis,
+                )
+                self.book.maybe_auto_restock(price, markup_frac)
+            else:
+                self._run_supply_chain_day(price)
+
+            self.book.snapshot(t, price)
+
+            if self.supply_chain is not None:
+                self.tranche_history.append(
+                    {
+                        "t": t,
+                        "physical_kg": self.book.tranches.physical_kg,
+                        "committed_kg": self.book.tranches.committed_kg,
+                        "in_transit_kg": self.supply_chain.in_transit_kg(),
+                        "expected_kg": self.supply_chain.expected_kg(),
+                        "available_kg": self.book.available_kg(),
+                    }
+                )
+
+            # Generic diagnostics hook (Phase 2): any policy may expose a
+            # `last_diagnostics` dict describing its own internal quoting
+            # state (reservation price, bid, spread, etc.). The simulation
+            # loop does not need to know which policy is running to record it.
+            diag = getattr(self.policy, "last_diagnostics", None)
+            if diag:
+                row = dict(diag)
+                row["t"] = t
+                self.policy_diagnostics.append(row)
+
+        final_price = self.price_process.price
+        result = {
+            "final_price": final_price,
+            "terminal_wealth": self.book.terminal_wealth(final_price),
+            "realized_pnl": self.book.realized_pnl(),
+            "mark_to_market_pnl": self.book.mark_to_market_pnl(final_price),
+            "cumulative_sales_kg": self.book.cumulative_sales_kg,
+            "cumulative_purchases_kg": self.book.cumulative_purchases_kg,
+            "restock_events": self.book.restock_events,
+            "failed_sales": self.book.failed_sales,
+            "n_orders": len(self.order_log),
+            "n_filled": sum(1 for o in self.order_log if o["filled"]),
+            "history": self.book.history,
+            "order_log": self.order_log,
+            "policy_diagnostics": self.policy_diagnostics,
+            "price_path": self.price_process.history,
+        }
+
+        if self.supply_chain is not None:
+            result.update(
+                {
+                    "tranche_history": self.tranche_history,
+                    "shipments_placed": self.supply_chain.total_shipments_placed,
+                    "emergency_orders_placed": self.supply_chain.total_emergency_orders,
+                    "failed_deliveries": self.supply_chain.total_failed_deliveries,
+                    "kg_lost_to_failed_deliveries": self.supply_chain.total_kg_lost_to_failure,
+                    "stockout_events": self.stockout_events,
+                    "final_backorder_queue_kg": sum(b["kg"] for b in self.backorder_queue),
+                }
+            )
+
+        return result
+
+    # ---- Phase 3 helpers ----------------------------------------------------
+
+    def _attempt_fill_phase3(self, order, ask: float, price: float) -> tuple[bool, str]:
+        """
+        Decide how to fill an order the policy has already agreed to price
+        (ask <= willingness_to_pay), in supply-chain mode:
+          1. If physical inventory covers it: immediate sale (as Phase 1/2).
+          2. Else if physical + expected in-transit supply (net of existing
+             commitments) plausibly covers it: accept as a customer
+             commitment (backorder), to be delivered once a shipment arrives.
+          3. Else: place an EMERGENCY order to cover the shortfall and still
+             accept the commitment -- see module docstring, "A deliberate
+             Phase 3 simplification," for why this project does not model
+             the dealer ever declining a priced order in Phase 3.
+        """
+        book = self.book
+        size = order.size_kg
+
+        if book.tranches.physical_kg >= size:
+            filled = book.record_sale(size, ask)
+            return filled, ("immediate" if filled else "rejected")
+
+        pipeline_available = (
+            book.tranches.physical_kg + self.supply_chain.expected_kg() - book.tranches.committed_kg
+        )
+        if pipeline_available >= size:
+            book.reserve_commitment(size)
+            self.backorder_queue.append({"kg": size, "price": ask})
+            return True, "backordered"
+
+        # Not enough even in the pipeline: place an emergency order to cover
+        # the shortfall, then accept the commitment anyway (see docstring).
+        shortfall = max(0.0, size - max(0.0, pipeline_available))
+        if shortfall > 0:
+            markup = self.supply_chain.replacement_markup_frac(
+                book.available_kg(), self.book.p.safety_stock_kg
+            ) * self.supply_chain.p.emergency_cost_multiplier
+            unit_cost = price * (1.0 + markup)
+            shipment = self.supply_chain.place_order(shortfall, emergency=True)
+            shipment.unit_cost_locked = unit_cost
+            book.pay_for_supply_order(shortfall, unit_cost)
+            self.stockout_events += 1
+
+        book.reserve_commitment(size)
+        self.backorder_queue.append({"kg": size, "price": ask})
+        return True, "emergency_backordered"
+
+    def _run_supply_chain_day(self, price: float) -> None:
+        """
+        Resolve any shipments due today, apply delivered kg first to the
+        backorder queue (FIFO) and then to free physical stock, and place a
+        new NORMAL order if the dealer's INVENTORY POSITION -- physical +
+        in-transit - committed, a standard inventory-theory concept distinct
+        from available_kg() -- has fallen to/below the reorder point (see
+        `_reorder_point_kg`).
+
+        WHY INVENTORY POSITION, NOT available_kg(), DRIVES THE REORDER DECISION
+        --------------------------------------------------------------------------
+        An earlier version of this method used `book.available_kg()` (physical
+        - committed - safety stock) directly as the reorder trigger. Because
+        that figure ignores shipments ALREADY placed and in transit, it stayed
+        negative for the entire ~2-week lead time after the first order was
+        placed, causing a NEW 150kg order to be placed on every single one of
+        those days -- a duplicate-ordering bug that produced multi-million-
+        dollar simulated losses in an early Phase 3 integration run (see
+        docs/assumptions_register.md, Section 9). Standard inventory theory
+        avoids exactly this failure mode by reordering against "inventory
+        position" (on hand + on order - backordered), not on-hand stock alone.
+        `available_kg()` remains the right figure for the replacement-cost
+        curvature and for reporting/plotting "what can I sell right now,"
+        but it is the wrong figure to gate new orders on.
+        """
+        book = self.book
+        resolved = self.supply_chain.advance_day()
+
+        for shipment in resolved:
+            if shipment.delivered_kg <= 0:
+                lost_kg = shipment.kg_ordered
+            else:
+                book.receive_delivery(shipment.delivered_kg, shipment.unit_cost_locked)
+                lost_kg = shipment.kg_ordered - shipment.delivered_kg
+
+            if lost_kg > 1e-9:
+                # The kg that was paid for (pay_for_supply_order, at order
+                # time) but never arrived is a sunk cost -- see
+                # accounting.py's record_lost_delivery_cost docstring for why
+                # this must be recognized explicitly, not left to silently
+                # vanish from realized_pnl/mark_to_market_pnl.
+                book.record_lost_delivery_cost(lost_kg * shipment.unit_cost_locked)
+
+            if shipment.delivered_kg <= 0:
+                continue
+
+            remaining = shipment.delivered_kg
+            while remaining > 1e-9 and self.backorder_queue:
+                first = self.backorder_queue[0]
+                portion = min(first["kg"], remaining)
+                delivered_amt = book.deliver_against_commitment(portion, first["price"])
+                first["kg"] -= delivered_amt
+                remaining -= delivered_amt
+                if first["kg"] <= 1e-9:
+                    self.backorder_queue.pop(0)
+                if delivered_amt <= 0:
+                    break  # avoid an infinite loop if nothing more can be delivered
+
+        inventory_position = (
+            book.tranches.physical_kg
+            + self.supply_chain.in_transit_kg()
+            - book.tranches.committed_kg
+        )
+        reorder_point_kg = self._reorder_point_kg()
+        if inventory_position <= reorder_point_kg:
+            markup = self.supply_chain.replacement_markup_frac(
+                book.available_kg(), book.p.safety_stock_kg
+            )
+            unit_cost = price * (1.0 + markup)
+            order_kg = book.p.restock_amount_kg
+            shipment = self.supply_chain.place_order(order_kg, emergency=False)
+            shipment.unit_cost_locked = unit_cost
+            book.pay_for_supply_order(order_kg, unit_cost)
+
+    def _reorder_point_kg(self) -> float:
+        """
+        Standard inventory-theory reorder point: expected demand during the
+        supply lead time, plus the safety-stock buffer itself --
+
+            reorder_point = (demand_rate_per_day * lead_time_days) + safety_stock_kg
+
+        WHY NOT JUST TRIGGER AT safety_stock_kg DIRECTLY
+        ------------------------------------------------------
+        An earlier version triggered a new order exactly when inventory
+        position fell to `safety_stock_kg`. But `available_kg()` (used for
+        the replacement-cost markup) is ALSO defined relative to
+        `safety_stock_kg` -- so triggering at that exact same level meant
+        `available_kg()` was at or near zero at the moment of EVERY reorder,
+        which put nearly every normal restock at the markup curve's worst
+        (capped) rate, not just genuine emergencies. Reordering earlier --
+        with enough of a cushion to cover expected demand across the lead
+        time -- is precisely what the reorder-point formula is FOR: it exists
+        so that, in typical conditions, the new shipment arrives before the
+        buffer is actually breached. This is a standard, textbook inventory-
+        management formula (not a new judgment-call parameter): it is
+        DERIVED from `safety_stock_kg`, `lead_time_days`, and the demand
+        process's own arrival rate and order size, all of which already have
+        register rows -- see docs/assumptions_register.md, Section 9.
+
+        This uses the demand process's arrival rate assuming every generated
+        order is filled (a conservative overestimate of true demand, since
+        the real fill rate is below 100% -- see any policy's fill-rate
+        results). That conservatism is deliberate: better to reorder slightly
+        early than to under-provision the lead-time buffer.
+        """
+        dt = self.price_process.p.dt
+        demand_kg_per_day = (
+            self.order_flow.p.arrival_rate_per_year * self.order_flow.p.order_size_mean_kg * dt
+        )
+        lead_time_demand_kg = demand_kg_per_day * self.supply_chain.p.lead_time_days
+        return self.book.p.safety_stock_kg + lead_time_demand_kg
