@@ -2,9 +2,9 @@
 simulation.py
 =============
 
-Phase 1 deliverable (extended in Phase 2, extended again in Phase 3): the
-loop that ties price_process + demand + accounting + a policy together into
-a single run.
+Phase 1 deliverable (extended in Phase 2, 3, and now Phase 4): the loop that
+ties price_process + demand + accounting + a policy together into a single
+run.
 
 WHAT ONE STEP DOES (Phase 1/2 mode -- the DEFAULT, unchanged)
 ------------------------------------------------------------------
@@ -29,8 +29,8 @@ different path, described in `_attempt_fill_phase3` and
     CUSTOMER COMMITMENT (backorder) if existing in-transit shipments'
     expected contribution can plausibly cover it, or triggers an EMERGENCY
     order (faster, costlier) if not -- rather than being an automatic lost
-    sale. See "A deliberate Phase 3 simplification" below for why this is a
-    real, flagged assumption, not free lunch.
+    sale, for MILITARY-LINKED orders specifically (civilian orders are lost
+    sales, matching Phase 1/2 -- see the military/civilian addendum below).
   - Restocking is no longer instant: new orders enter a shipment queue with
     a lead time (src/supply_chain.py) and a chance of partial/failed
     delivery, resolved day by day via `SupplyChain.advance_day()`.
@@ -38,21 +38,55 @@ different path, described in `_attempt_fill_phase3` and
     available inventory) is recorded in `policy_diagnostics`-style history
     (`self.tranche_history`) for later analysis.
 
-Phase 1/2 usage (no `supply_chain_params` argument) is COMPLETELY UNCHANGED
--- every existing test that constructs a `Simulation` without this argument
-exercises the exact same code path as before Phase 3 existed.
+MILITARY/CIVILIAN ADDENDUM (bundled into Phase 3 supply-chain mode)
+------------------------------------------------------------------------
+Orders are tagged `military_linked`; civilian orders that can't be filled
+from physical stock are LOST SALES (matching Phase 1/2 exactly). Only
+military-linked orders roll into a committed backlog, with emergency
+shortfall coverage routed specifically through the (less reliable) military
+supply channel. See `_attempt_fill_phase3` for the full mechanism and
+docs/assumptions_register.md, Section 10, for the register rows.
+
+WHAT'S NEW IN PHASE 4 REGIME MODE (opt-in via `regime_params`)
+--------------------------------------------------------------------
+Passing a `RegimeParams` to the constructor activates a fourth layer:
+  - A `RegimeSwitcher` (src/regimes.py) steps a four-state Markov chain
+    (Normal/Delayed/Severe/Recovery) once per day.
+  - The price process's jump intensity/size multipliers, the supply chain's
+    civilian AND military reliability, the demand process's arrival-rate
+    multiplier, and the Hawkes excitation strength are all read from the
+    CURRENT regime before that day's price step, order generation, and
+    shipment resolution -- so a Severe regime genuinely produces bigger/more
+    frequent price jumps, less reliable shipments (especially military-
+    channel), and more clustered demand, all at once, from one shared
+    regime state.
+  - Demand switches from Phase 1-3's single aggregate Poisson process to
+    `SectorHawkesOrderFlow` (src/demand.py): four sectors, each with its own
+    arrival rate, order size, WTP dispersion, and military-linked share, plus
+    a shared Hawkes excitation term for panic clustering, plus
+    military-linked orders drawing from a wider, higher willingness-to-pay
+    distribution (the register's previously-flagged price-sensitivity gap,
+    now closed -- see src/demand.py's module docstring).
+  - Regime mode REQUIRES supply-chain mode (military-channel reliability has
+    nothing to modulate without it) -- if `regime_params` is given without
+    `supply_chain_params`, a default `SupplyChainParams()` is created
+    automatically, so the two don't have to be wired up by hand every time.
+
+Phase 1/2 usage (no `supply_chain_params`, no `regime_params`) is COMPLETELY
+UNCHANGED -- every existing test that constructs a `Simulation` without these
+arguments exercises the exact same code path as before Phase 3/4 existed.
+Phase 3 usage (supply_chain_params only, no regime_params) is ALSO UNCHANGED
+from how it worked before Phase 4 existed -- regimes are strictly additive.
 
 A DELIBERATE PHASE 3 SIMPLIFICATION (explicit, not hidden)
 ----------------------------------------------------------------
-Phase 3's fill logic never turns away an order the policy already agreed to
-price (`ask <= willingness_to_pay`): if physical and expected supply can't
-cover it, the simulation places an EMERGENCY order rather than reject the
-sale outright. This means `failed_sales` should rarely if ever increment in
-Phase 3 mode -- a real dealer might sometimes decline rather than scramble,
-but modeling that decision is deferred (there's no register-backed parameter
-yet for "how much emergency cost is too much to bear," and adding one without
-a row would repeat the exact mistake Phase 1 made and corrected). This is
-logged in docs/assumptions_register.md, Section 9.
+Phase 3's fill logic never turns away a MILITARY-LINKED order the policy
+already agreed to price: if physical and expected supply can't cover it, the
+simulation places an emergency order rather than reject the sale outright.
+This means military-linked `failed_sales` should rarely if ever occur. A
+real dealer might sometimes decline rather than scramble, but modeling that
+decision is deferred (there's no register-backed parameter yet for "how much
+emergency cost is too much to bear").
 
 WHY THIS STRUCTURE
 -------------------
@@ -69,17 +103,18 @@ future policy can expose whatever internal state is worth plotting later.
 LIMITATIONS (explicit, not hidden)
 -----------------------------------
 - Single commodity, single dealer, no competitors.
-- No sector structure, no regimes, no Hawkes clustering (Phase 4).
 - Time step is daily; intraday dynamics are not modeled.
 - `T` (trading horizon, years) is simply `n_steps * dt` -- i.e., the
   simulation's own length. This is the natural choice for reproducing
   Avellaneda-Stoikov's finite-horizon assumption, but it means the "horizon"
   isn't derived from any real dealer planning cycle -- register Section 5,
   "Trading horizon length" row.
-- Phase 3's emergency-order-always-covers-it assumption (see above).
-- No channel-dependent (military/civilian) shipment reliability -- see
-  src/supply_chain.py's module docstring for why this roadmap item is
-  deliberately NOT implemented yet.
+- Phase 3's emergency-order-always-covers-it assumption for military-linked
+  orders (see above).
+- Regime transitions are checked once per day (see src/regimes.py); no
+  intra-day regime changes.
+- The Hawkes excitation state is shared across sectors, not per-sector (see
+  src/demand.py's module docstring for why).
 
 WHAT BREAKS IF THIS MODULE IS REMOVED
 --------------------------------------
@@ -91,9 +126,13 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from src.price_process import GalliumPriceProcess, PriceProcessParams
-from src.demand import PoissonOrderFlow, DemandParams
+from src.demand import (
+    PoissonOrderFlow, DemandParams,
+    SectorHawkesOrderFlow, SectorParams, MilitaryElasticityParams, HawkesParams,
+)
 from src.accounting import DealerBook, AccountingParams
 from src.supply_chain import SupplyChain, SupplyChainParams
+from src.regimes import RegimeSwitcher, RegimeParams
 
 
 @dataclass
@@ -111,6 +150,10 @@ class Simulation:
         accounting_params: AccountingParams = None,
         config: SimulationConfig = None,
         supply_chain_params: SupplyChainParams = None,
+        regime_params: RegimeParams = None,
+        sectors: list[SectorParams] = None,
+        military_elasticity: MilitaryElasticityParams = None,
+        hawkes_params: HawkesParams = None,
     ):
         self.policy = policy
         self.config = config or SimulationConfig()
@@ -122,8 +165,14 @@ class Simulation:
         # Use a distinct but deterministic sub-seed for demand so that price
         # and demand randomness can be independently re-seeded if needed.
         demand_seed = None if rng_seed is None else rng_seed + 1
-        self.order_flow = PoissonOrderFlow(demand_params or DemandParams(), seed=demand_seed)
         self.book = DealerBook(accounting_params or AccountingParams())
+
+        # Phase 4: regime mode requires supply-chain mode (military-channel
+        # reliability has nothing to modulate without it). Auto-create a
+        # default SupplyChainParams() if the caller only supplied
+        # regime_params -- documented, not a silent surprise.
+        if regime_params is not None and supply_chain_params is None:
+            supply_chain_params = SupplyChainParams()
 
         # Phase 3: supply-chain mode is entirely opt-in. If no
         # supply_chain_params is given, self.supply_chain stays None and
@@ -134,6 +183,26 @@ class Simulation:
             if supply_chain_params is not None
             else None
         )
+
+        # Phase 4: regime-switching is entirely opt-in. If regime_params is
+        # None, self.regime_switcher stays None and run() never touches
+        # regime-dependent multipliers -- Phase 1-3 behavior is identical to
+        # before Phase 4 existed.
+        regime_seed = None if rng_seed is None else rng_seed + 3
+        self.regime_switcher = (
+            RegimeSwitcher(regime_params, seed=regime_seed) if regime_params is not None else None
+        )
+
+        # Phase 4: demand source. Sector+Hawkes flow only when regime mode is
+        # active; otherwise the exact Phase 1-3 PoissonOrderFlow, unchanged.
+        if self.regime_switcher is not None:
+            self.order_flow = SectorHawkesOrderFlow(
+                sectors=sectors, military_elasticity=military_elasticity,
+                hawkes_params=hawkes_params, seed=demand_seed,
+            )
+        else:
+            self.order_flow = PoissonOrderFlow(demand_params or DemandParams(), seed=demand_seed)
+
         self.backorder_queue: list[dict] = []  # only used in Phase 3 mode
         self.tranche_history: list[dict] = []  # only populated in Phase 3 mode
         self.stockout_events = 0               # only incremented in Phase 3 mode
@@ -143,6 +212,7 @@ class Simulation:
                                                  # rate, not just an acceptance rate (see
                                                  # "military_fill_rate" caveat in run()'s
                                                  # result dict)
+        self.regime_history: list[dict] = []    # (Phase 4) only populated in regime mode
 
         self.order_log: list[dict] = []
         self.policy_diagnostics: list[dict] = []
@@ -153,9 +223,41 @@ class Simulation:
         sigma_frac = self.price_process.p.sigma
 
         for t in range(self.config.n_steps):
-            price = self.price_process.step()
+            # Phase 4: step the regime BEFORE anything else that day, so
+            # today's price jump, demand, and shipment reliability all react
+            # to today's regime, not yesterday's.
+            if self.regime_switcher is not None:
+                if t > 0:  # regime starts at its initial_regime on day 0
+                    self.regime_switcher.step()
+                jump_intensity_mult = self.regime_switcher.jump_intensity_multiplier()
+                jump_size_mult = self.regime_switcher.jump_size_multiplier()
+                # Supply-chain reliability is updated for TODAY's shipment
+                # resolutions and any new orders placed today.
+                self.supply_chain.p.reliability = self.regime_switcher.civilian_reliability()
+                self.supply_chain.p.reliability_military = self.regime_switcher.military_reliability()
+                price = self.price_process.step(
+                    regime_jump_intensity_multiplier=jump_intensity_mult,
+                    regime_jump_size_multiplier=jump_size_mult,
+                )
+                orders = self.order_flow.generate_orders(
+                    mid_price=price, dt=dt,
+                    demand_intensity_multiplier=self.regime_switcher.demand_intensity_multiplier(),
+                    hawkes_excitation_strength=self.regime_switcher.hawkes_excitation(),
+                )
+                self.regime_history.append(
+                    {
+                        "t": t,
+                        "regime": self.regime_switcher.current_regime,
+                        "civilian_reliability": self.supply_chain.p.reliability,
+                        "military_reliability": self.supply_chain.p.reliability_military,
+                        "excitation": getattr(self.order_flow, "excitation", None),
+                    }
+                )
+            else:
+                # Phase 1-3 path, unchanged: no regime multipliers, flat demand.
+                price = self.price_process.step()
+                orders = self.order_flow.generate_orders(mid_price=price)
 
-            orders = self.order_flow.generate_orders(mid_price=price)
             ask = self.policy.quote_ask(
                 mid_price=price,
                 inventory_kg=self.book.inventory_kg,
@@ -186,6 +288,7 @@ class Simulation:
                         "size_kg": order.size_kg,
                         "willingness_to_pay": order.willingness_to_pay,
                         "military_linked": order.military_linked,
+                        "sector": order.sector,
                         "filled": filled,
                         "fill_type": fill_type,
                     }
@@ -292,6 +395,24 @@ class Simulation:
                         self.supply_chain.total_failed_deliveries_by_channel
                     ),
                     "kg_lost_by_channel": dict(self.supply_chain.total_kg_lost_by_channel),
+                }
+            )
+
+        if self.regime_switcher is not None:
+            sector_fill_rates = {}
+            for sector_name in {o["sector"] for o in self.order_log}:
+                sector_orders = [o for o in self.order_log if o["sector"] == sector_name]
+                sector_filled = sum(1 for o in sector_orders if o["filled"])
+                sector_fill_rates[sector_name] = {
+                    "n_orders": len(sector_orders),
+                    "n_filled": sector_filled,
+                    "fill_rate": sector_filled / len(sector_orders) if sector_orders else None,
+                }
+            result.update(
+                {
+                    "regime_history": self.regime_history,
+                    "regime_days": dict(self.regime_switcher.regime_days),
+                    "sector_fill_rates": sector_fill_rates,
                 }
             )
 
@@ -496,10 +617,23 @@ class Simulation:
         the real fill rate is below 100% -- see any policy's fill-rate
         results). That conservatism is deliberate: better to reorder slightly
         early than to under-provision the lead-time buffer.
+
+        (Phase 4) For `SectorHawkesOrderFlow`, demand rate is summed across
+        all sectors' base arrival rates * mean order size -- the Hawkes
+        excitation term and regime demand multiplier are deliberately NOT
+        included here (excitation is a short-lived spike, not a sustained
+        rate, and folding the regime multiplier in would make the reorder
+        point itself regime-dependent in a way that's hard to reason about
+        -- kept as a flagged simplification, not a hidden one).
         """
         dt = self.price_process.p.dt
-        demand_kg_per_day = (
-            self.order_flow.p.arrival_rate_per_year * self.order_flow.p.order_size_mean_kg * dt
-        )
+        if isinstance(self.order_flow, SectorHawkesOrderFlow):
+            demand_kg_per_day = sum(
+                s.arrival_rate_per_year * s.order_size_mean_kg for s in self.order_flow.sectors
+            ) * dt
+        else:
+            demand_kg_per_day = (
+                self.order_flow.p.arrival_rate_per_year * self.order_flow.p.order_size_mean_kg * dt
+            )
         lead_time_demand_kg = demand_kg_per_day * self.supply_chain.p.lead_time_days
         return self.book.p.safety_stock_kg + lead_time_demand_kg

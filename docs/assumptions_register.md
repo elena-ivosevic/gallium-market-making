@@ -385,6 +385,122 @@ reproducibility, not written into `AccountingParams`/`SupplyChainParams`.
 
 ---
 
+## 11. Phase 4 implementation values (regimes, sectors, Hawkes demand, military elasticity)
+
+This section instantiates concrete values for the §1/§2/§4 rows left as "—" placeholders,
+and adds new rows for what Phase 4 introduces that no earlier section anticipated:
+per-sector military-linked shares, military demand price-sensitivity, and per-regime
+military-channel reliability (the Section 10 addendum only ever specified a single
+Normal-regime military discount).
+
+### 11.1 Regime-dependent price jump parameters (instantiating §1)
+
+| Regime | Jump intensity multiplier (vs. Normal) | Jump size multiplier (vs. Normal) | Source type | Justification |
+|---|---|---|---|---|
+| Normal | 1.0 | 1.0 | Judgment call | Baseline — matches `PriceProcessParams` defaults (§1, §7) |
+| Delayed | 2.0 | 1.3 | Judgment call | Licensing-requirement period (2023): more frequent, moderately larger jumps than calm baseline, well short of Severe |
+| Severe | 6.0 | 2.0 | Judgment call, informed by real data | §1's existing "substantially elevated" Severe-regime row, now a concrete multiplier; matches the clustered, discrete repricing pattern in phase0_research_notes.md §2 |
+| Recovery | 2.5 | 1.2 | Judgment call | Above Normal (the register's own framing: "a pause, not a resolution," phase0_research_notes.md §2) but below Delayed — some residual repricing risk as the market unwinds |
+
+### 11.2 Regime-dependent shipment reliability (instantiating §2, and extending §10 to all four regimes)
+
+| Regime | Civilian reliability | Military reliability | Civilian-military gap | Source type | Justification |
+|---|---|---|---|---|---|
+| Normal | 95% | 75% | 20pp | Judgment call (civilian: real §2 row; military: §10's -20pp) | Unchanged from §2/§10 |
+| Delayed | 70% | 45% | 25pp | Judgment call | Civilian is §2's existing row; military discount widened slightly — early licensing friction plausibly hits military end-use scrutiny somewhat harder even before a full ban |
+| Severe | 40% | 15% | 25pp | Judgment call, informed by real data | Civilian is §2's existing row; military discount widened further, informed by phase0_research_notes.md §2's point that a military end-use ban can remain active even during a general licensing regime |
+| Recovery | 75% | 40% | 35pp | Judgment call | Civilian is §2's existing row; military lags well behind — phase0_research_notes.md §2 explicitly notes civilian licensing has historically eased before military-end-use restrictions, so a RECOVERING civilian channel actually WIDENS the gap versus a still-lagging military channel, rather than narrowing it |
+
+**A correction, caught by this project's own test suite:** an earlier draft of this row
+claimed in prose that "Severe is where the channel gap should be starkest," but the
+actual chosen numbers make Recovery's gap (35pp) wider than Severe's (25pp) — internally
+inconsistent. Rather than force the numbers to match the sloppier claim,
+`tests/test_regimes.py::test_severe_and_recovery_both_show_wider_reliability_gaps_than_normal`
+was written to check the economically correct, defensible property instead: both Severe
+AND Recovery show wider gaps than Normal, and Recovery's can legitimately exceed Severe's,
+because "civilian recovers faster than military" and "military ban persists during the
+worst of the disruption" are two different, complementary reasons for a wide gap, not one
+single "severity" axis where Severe must always be the extreme.
+
+### 11.3 Regime transition matrix (register §2: "to be specified in regimes.py")
+
+Daily self-transition probabilities (implying an expected regime duration via
+`1/(1-p_self)` at a 252-day year convention), and the off-diagonal transitions:
+
+| From \ To | Normal | Delayed | Severe | Recovery |
+|---|---|---|---|---|
+| Normal | 0.997 | 0.003 | 0.000 | 0.000 |
+| Delayed | 0.010 | 0.980 | 0.010 | 0.000 |
+| Severe | 0.000 | 0.000 | 0.985 | 0.015 |
+| Recovery | 0.005 | 0.000 | 0.003 | 0.992 |
+
+Implied expected durations: Normal ~333 days, Delayed ~50 days, Severe ~67 days,
+Recovery ~125 days. Judgment call, no fitted multi-state data exists (only one real
+historical escalation cycle to draw qualitative shape from, per §2's own row). Chosen to:
+(a) make Normal the by-far-most-persistent state, (b) only allow Severe to be entered via
+Delayed, never directly from Normal (matching the real 2023 licensing → 2024 ban
+sequence), (c) let Recovery relapse into Severe (small probability) rather than only ever
+improving, since phase0_research_notes.md §2 explicitly frames the 2025 suspension as
+conditional and revocable, not a clean resolution.
+
+### 11.4 Sector definitions (instantiating §4)
+
+| Sector | Relative arrival rate (orders/year) | Order size mean (kg) | WTP spread (frac) | Military-linked share | Source type |
+|---|---|---|---|---|---|
+| Semiconductors | 140 | 20 | 0.04 | 0.10 | Judgment call |
+| Telecommunications | 70 | 22 | 0.045 | 0.12 | Judgment call |
+| Defense & Aerospace | 25 | 35 | 0.08 | 0.70 | Judgment call |
+| Solar / Clean Energy | 40 | 18 | 0.06 | 0.05 | Judgment call |
+
+Rankings (Semiconductors highest frequency, Defense & Aerospace highest WTP dispersion
+and highest military share, Solar most price-sensitive) directly match the register's
+existing §4 "Base order-arrival rate per sector" and "Sector willingness-to-pay ranking"
+rows and phase0_research_notes.md §3's qualitative sector descriptions. Combined arrival
+rate (140+70+25+40 = 275/year) is close to but not identical to the pre-sector aggregate
+`DemandParams.arrival_rate_per_year` (250, §7) — the small increase is a judgment call,
+not a calibration target: sector totals were built up independently per sector rather
+than forced to sum to the old aggregate number.
+
+### 11.5 Military-linked share now per-sector, superseding §10's aggregate figure
+
+§10 logged a single aggregate `military_linked_share = 0.15` as an explicit placeholder
+"standing in for Phase 4's per-sector shares." Per this file's own rule 4 ("do not delete
+superseded rows — strike through or annotate them"): **§10's aggregate 15% figure is
+superseded by the per-sector shares in §11.4 above**, effective wherever
+`src/demand.py`'s new sector-based order flow is used. The old aggregate
+`DemandParams.military_linked_share` field and the non-sector `PoissonOrderFlow` class
+remain in code, unchanged, for backward compatibility with every Phase 1–3 test — they
+are simply no longer what Phase 4 mode actually uses.
+
+### 11.6 Military demand price-sensitivity (new — the register's previously-flagged gap)
+
+| Parameter | Value | Meaning | Source type | Justification |
+|---|---|---|---|---|
+| Military WTP spread multiplier | 2.5× the sector's civilian WTP spread | Military-linked orders' willingness-to-pay is drawn from a WIDER distribution than civilian orders in the same sector | Judgment call, informed by procurement-cycle literature (phase0_research_notes.md §3) | A wider WTP spread means a flatter execution-probability-vs-price curve: military orders are less likely to walk away as price rises, without changing their AVERAGE price sensitivity direction |
+| Military WTP mean shift | +3% above the sector's civilian mean WTP | Military-linked orders are centered slightly higher, not just wider | Judgment call | Reflects that procurement-driven demand is somewhat less price-anchored to the current spot quote than discretionary civilian demand |
+
+This is the exact gap §10 flagged: *"Without a price-sensitivity difference, a
+pricing-only policy has no way to differentially protect military demand through the ask
+price alone."* Phase 4 closes it. Whether this elasticity difference alone (without
+Phase 5's priority overlay) meaningfully changes the military-vs-civilian fill-rate gap
+is an open, testable question — see the Phase 4 mastery checkpoint in the README, not
+assumed here.
+
+### 11.7 Hawkes process parameters (instantiating §4)
+
+| Parameter | Value | Source type | Justification |
+|---|---|---|---|
+| Hawkes excitation strength (alpha), Normal | 0.05 | Model assumption | Low branching ratio in calm conditions — one order barely raises the odds of another |
+| Hawkes excitation strength (alpha), Severe | 0.6 | Model assumption | §4's own row: "moderate-to-high during Severe regime" — a single urgent order meaningfully raises near-term arrival intensity |
+| Hawkes decay rate (beta) | 8.0 / year (≈ 32-day half-life) | Model assumption | §4's own wording: influence fades "over a period of days to weeks," not instantly or permanently |
+
+Excitation strength is regime-dependent (linearly interpolated between the Normal and
+Severe values above, keyed to the same four-regime multiplier pattern as §11.1) — panic
+clustering should be stronger precisely when scarcity fears are already elevated, per
+§4's own justification for this row.
+
+---
+
 ## Notes on how to use this table
 
 1. No parameter is added to code before it has a row here.

@@ -66,7 +66,8 @@ model code existed, is in
 | 2 | Standard Avellaneda–Stoikov reproduction | ✅ Complete |
 | 3 | Physical / committed / in-transit / expected inventory separation | ✅ Complete |
 | — | Addendum: military/civilian demand channel (pre-Phase 4, aggregate) | ✅ Complete |
-| 4 | Markov regimes and Hawkes demand | ⏳ Not started |
+| 4 | Markov regimes and Hawkes demand | ✅ Complete |
+| 5 | Scarcity-adjusted market-making policy | ⏳ Not started |
 | 5 | Scarcity-adjusted market-making policy | ⏳ Not started |
 | 6 | Dynamic-programming policy | ⏳ Not started |
 | 7 | Sector transmission stress test | ⏳ Not started |
@@ -81,9 +82,9 @@ model code existed, is in
   value, its meaning, its source type, its justification, and its expected sensitivity.
   Section 7 logs Phase 1's concrete values; Section 8 logs Phase 2's; Section 9 logs
   Phase 3's, including two real bugs found during integration testing; Section 10 is the
-  military/civilian addendum, including a methodological caveat about what
-  "military_fill_rate" does and doesn't measure — read before trusting any headline
-  military-vs-civilian number.
+  military/civilian addendum; Section 11 is Phase 4's (regimes, sectors, Hawkes, and the
+  military price-sensitivity gap Section 10 flagged) — including a self-caught
+  inconsistency between one row's prose and its own numbers, corrected rather than hidden.
 - [`docs/README_honesty_paragraph.md`](docs/README_honesty_paragraph.md) — the full
   honesty statement and why it was written before any model code.
 - [`docs/phase0_research_notes.md`](docs/phase0_research_notes.md) — the public research
@@ -541,6 +542,116 @@ parameters.
 
 ---
 
+## Phase 4 — Regimes and Demand Dynamics
+
+Phase 4 replaces the flat, homogeneous demand and static reliability every earlier phase
+used with a four-state Markov regime chain, four customer sectors, Hawkes panic-demand
+clustering, and — closing a gap the military addendum explicitly flagged — a real
+price-sensitivity difference between military-linked and civilian demand.
+
+### Components built
+
+| Module | What it does | Why it's included | Key limitation |
+|---|---|---|---|
+| `src/regimes.py` | Four-state Markov chain (Normal/Delayed/Severe/Recovery); exposes per-regime price-jump multipliers, civilian/military shipment reliability, demand intensity, and Hawkes excitation | Real disruptions escalate and persist stochastically, not on a fixed schedule — register §2's own row anticipated this living in code | Memoryless (no duration-dependent hazard); only one real historical cycle exists to inform the matrix qualitatively |
+| `src/demand.py` (extended) | New `SectorHawkesOrderFlow`: 4 sectors with independent arrival rate/size/WTP/military-share, a shared Hawkes excitation term, and military-linked orders drawing from a wider, higher WTP distribution | Closes the register's explicitly-flagged gap: "without a price-sensitivity difference, a pricing-only policy has no way to differentially protect military demand through the ask price alone" | Hawkes excitation is shared across sectors, not per-sector (a flagged simplification, not per-sector Hawkes) |
+| `src/simulation.py` (extended again) | Opt-in `regime_params`; steps the regime once per day and feeds its multipliers into the price process, supply chain, and demand flow before that day's activity | Every earlier mode (Phase 1/2, Phase 3 supply-chain, the military addendum) remains byte-for-byte unchanged when `regime_params` is omitted | Regime mode auto-creates default `SupplyChainParams()` if omitted — military-channel reliability has nothing to modulate without it |
+
+### Tests
+
+28 new tests across 3 files (139 total, all passing):
+
+```
+tests/test_regimes.py              — transition-matrix validity, persistence, escalation
+                                      constraints (Severe only via Delayed), per-regime lookups
+tests/test_sectors_hawkes.py       — sector proportions, Hawkes clustering, military WTP
+                                      spread/shift, the zero-elasticity edge case
+tests/test_phase4_integration.py   — full Simulation runs in regime mode, a regression test
+                                      proving Phase 1-3 modes are unaffected, and both
+                                      roadmap mastery-checkpoint predictions
+```
+
+### A real, structural bug this test suite caught in its own register
+
+An earlier draft of Section 11.2 claimed in prose that "Severe is where the channel gap
+should be starkest," but the actual chosen reliability numbers made Recovery's gap (35pp)
+wider than Severe's (25pp) — a genuine inconsistency between the register's narrative and
+its own numbers, caught by an early version of
+`test_severe_and_recovery_both_show_wider_reliability_gaps_than_normal`
+failing. Rather than force the numbers to match the sloppier claim, the test and the
+register prose were both corrected to the more defensible property: **both** Severe
+(military ban persists) **and** Recovery (civilian recovers faster than military) show
+wide gaps versus Normal, for two different reasons — not one "severity" axis where Severe
+must always be the extreme. See `docs/assumptions_register.md`, Section 11.2.
+
+### Mastery checkpoints
+
+**Why model military-linked and civilian-linked demand with different shipment
+reliability, rather than one reliability parameter for all customers?** Pooling both into
+a single number would hide exactly the asymmetry real export controls create — a military
+end-use ban can remain active even while general licensing eases (confirmed directly:
+`test_military_reliability_always_below_civilian_in_every_regime` holds in all four
+regimes, not just Severe).
+
+**Why does tagging an order "military-linked" do nothing on its own — and what has to be
+true before the tag changes any outcome?** Confirmed directly by
+`test_zero_elasticity_difference_makes_military_and_civilian_wtp_converge`: with the
+elasticity multiplier set to 1.0 and the mean shift to 0, a military tag has zero effect
+on willingness-to-pay, and therefore zero effect on fill rate under a pricing-only policy
+— the tag has to change *something* (elasticity here; a non-price mandate in Phase 5) or
+it's cosmetic.
+
+**Predict, then confirm — removing the Hawkes component:** predicted fewer demand
+clusters, lower tail risk in daily order counts, smaller extreme-spread pressure.
+Confirmed: `test_mastery_checkpoint_removing_hawkes_reduces_demand_clustering` shows
+strictly lower day-to-day order-count variance with excitation off, for the identical
+average rate.
+
+**Predict, then confirm — removing the military/civilian price-sensitivity difference:**
+predicted the fill-rate gap should shrink toward zero under a pricing-only policy, since
+nothing about the tag then affects execution. Confirmed across 20 matched seeds:
+`test_mastery_checkpoint_identical_elasticity_shrinks_fill_rate_gap` — this is the exact
+edge case motivating Phase 5/7's research question (does pricing alone protect military
+supply, or does it take an explicit non-price mandate?).
+
+### A genuinely strong finding — pricing alone already produces a real fill-rate gap
+
+Across 40 matched seeds, **before any backlog protection or priority overlay exists**,
+military-linked orders fill at **47.5%** versus civilian's **18.3%** — purely from the
+price-sensitivity mechanism (register §11.6). Defense & Aerospace (70% military-linked)
+fills at **43.0%**, more than double Semiconductors' **19.0%**. This is a real, verified
+result, not a design assumption: it means Phase 5's forthcoming research question ("does
+pricing alone protect military-critical supply?") starts from **partial protection already
+existing through elasticity alone** — the interesting question for Phase 5/9 is how much
+*more* an explicit non-price mandate adds on top of this, and at what P&L cost, not
+whether pricing does anything at all.
+
+See `results/figures/phase4_regime_path_and_excitation.png` (regime path, civilian/military
+reliability, Hawkes excitation, and price over ~6 simulated years),
+`results/figures/phase4_sector_and_military_fill_rates.png` (the fill-rate comparison
+above), and `results/figures/phase4_hawkes_clustering_demo.png` (illustrative — uses
+stronger-than-calibrated excitation purely to make clustering visually obvious).
+
+### Explicit Phase 4 limitations (Core Rule test)
+
+- Hawkes excitation is a single shared, market-wide state, not four independent per-sector
+  processes — a flagged simplification (src/demand.py module docstring).
+- The regime transition matrix is hand-specified from one qualitative historical episode;
+  no fitted multi-cycle data exists or could exist yet.
+- The reorder-point formula (Phase 3) deliberately excludes the regime demand multiplier
+  and Hawkes excitation when computing lead-time demand — a flagged simplification, not an
+  oversight (see `_reorder_point_kg`'s docstring).
+- Sector definitions remain coarse (four sectors, internally homogeneous); no
+  within-sector customer heterogeneity.
+
+If Phase 4 were removed: every policy would keep quoting as if supply conditions never
+change, there would be no sector-level fill-rate comparison for Phase 7, no demand
+clustering to stress-test inventory against for Phase 9's Hawkes ablation, and no evidence
+of whether military-linked demand's price-insensitivity alone changes outcomes under a
+pricing-only policy — this project's central open question would have no first data point.
+
+---
+
 ## Repository structure (current)
 
 ```
@@ -557,6 +668,7 @@ GaMM-RX/
 │   ├── accounting.py
 │   ├── inventory.py
 │   ├── supply_chain.py
+│   ├── regimes.py
 │   ├── simulation.py
 │   └── policies/
 │       ├── fixed_spread.py
@@ -574,7 +686,10 @@ GaMM-RX/
 │   ├── test_inventory_heuristic.py
 │   ├── test_phase2_comparison.py
 │   ├── test_phase3_integration.py
-│   └── test_military_addendum.py
+│   ├── test_military_addendum.py
+│   ├── test_regimes.py
+│   ├── test_sectors_hawkes.py
+│   └── test_phase4_integration.py
 └── results/
     └── figures/
         ├── phase1_demo_run.png
@@ -582,7 +697,10 @@ GaMM-RX/
         ├── phase2_pnl_distribution_preview.png
         ├── phase3_inventory_tranches.png
         ├── phase3_stressed_supply_chain.png
-        └── phase3_military_vs_civilian_fill_rate.png
+        ├── phase3_military_vs_civilian_fill_rate.png
+        ├── phase4_regime_path_and_excitation.png
+        ├── phase4_sector_and_military_fill_rates.png
+        └── phase4_hawkes_clustering_demo.png
 ```
 
 Modules planned by the full roadmap (`regimes.py`, `scarcity_adjusted_as.py`,
@@ -592,10 +710,14 @@ they are listed in the project roadmap as future work, not represented here as f
 
 ## Future Work
 
-- Everything in Phases 4–11 of the roadmap: regime switching, Hawkes demand, the
-  scarcity-adjusted policy, dynamic programming, sector stress testing, matched Monte
+- Everything in Phases 5–11 of the roadmap: the scarcity-adjusted policy (and its
+  priority-allocation overlay), dynamic programming, sector stress testing, matched Monte
   Carlo with confidence intervals, ablation/sensitivity analysis, and qualitative
   historical validation.
+- Per-sector (not shared) Hawkes excitation states — Phase 4's current flagged
+  simplification.
+- Folding the regime demand multiplier and Hawkes excitation into the reorder-point
+  formula, instead of excluding them as Phase 4 currently does.
 - Phase 4's real per-sector military-linked shares and price-sensitivity difference
   between channels — the pre-Phase 4 addendum (aggregate, single share, no elasticity
   difference) is a placeholder, not the full design.
