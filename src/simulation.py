@@ -300,7 +300,33 @@ class Simulation:
                 ),
                 committed_kg=self.book.tranches.committed_kg if self.supply_chain is not None else 0.0,
                 regime_severity=self._regime_severity(),
+                # Phase 6: the DP policy's discrete state lookup needs the
+                # actual regime NAME (not just the continuous severity
+                # score above). Every other policy ignores this via
+                # **_ignored_state.
+                regime_name=(
+                    self.regime_switcher.current_regime if self.regime_switcher is not None else None
+                ),
             )
+
+            # Phase 6: policies that expose wants_emergency_purchase() (the
+            # DP policy's "purchase emergency inventory" action) can trigger
+            # a real emergency order, independent of Phase 3's own
+            # reorder-point logic. Checked once per day, right after the
+            # quote -- this is the ONLY way a policy's chosen ACTION (as
+            # opposed to its quoted PRICE) reaches back into the supply
+            # chain; no earlier policy has this hook.
+            if self.supply_chain is not None and getattr(
+                self.policy, "wants_emergency_purchase", lambda: False
+            )():
+                markup = self.supply_chain.replacement_markup_frac(
+                    self.book.available_kg(), self.book.p.safety_stock_kg
+                ) * self.supply_chain.p.emergency_cost_multiplier
+                unit_cost = price * (1.0 + markup)
+                order_kg = self.book.p.restock_amount_kg
+                shipment = self.supply_chain.place_order(order_kg, emergency=True, channel="civilian")
+                shipment.unit_cost_locked = unit_cost
+                self.book.pay_for_supply_order(order_kg, unit_cost)
 
             for order in orders:
                 want_fill = ask <= order.willingness_to_pay
