@@ -501,6 +501,102 @@ clustering should be stronger precisely when scarcity fears are already elevated
 
 ---
 
+## 12. Phase 5 implementation values (scarcity-adjusted policy + priority overlay)
+
+### 12.1 The five new premiums (instantiating §5's "Scarcity-premium functional form" row, and adding four siblings it didn't cover)
+
+All premiums are additive dollar amounts added to the standard Avellaneda-Stoikov
+reservation price (`src/policies/avellaneda_stoikov.py`), which then flows through
+unchanged into `ask = reservation_price + spread/2`. Each is capped to avoid repeating
+Phase 3's unbounded-convexity bug (see §9) — every ratio-based term below is explicitly
+clamped before being raised to a power.
+
+| Premium | Formula | Parameter | Value | Source type | Justification |
+|---|---|---|---|---|---|
+| Scarcity premium | `mid × γ_scarcity × min(1, shortfall/safety_stock)²` where shortfall = max(0, safety_stock − available_kg) | `scarcity_gamma` | 0.05 | Academic-model assumption (§5's existing row) | Convex, capped at `mid × γ_scarcity` (≈5% of price) — same capping lesson as §9's replacement-cost fix |
+| Replacement-cost premium | `mid × pass_through × (replacement_markup_frac − base_markup)` | `replacement_cost_pass_through` | 0.15 | Judgment call | Only partially passes the supply chain's own nonlinear replacement cost (§9) through to the customer quote — a dealer eating some of its own restocking cost is more realistic than 100% pass-through |
+| Shipment-risk premium | `mid × γ_shipment × (1 − civilian_reliability)` | `shipment_risk_gamma` | 0.10 | Judgment call | Uses the CURRENT (possibly regime-modulated, §11.2) civilian reliability directly — a policy quoting in a Severe regime should demand more compensation for unreliable incoming supply, without needing its own separate regime lookup |
+| Commitment premium | `mid × γ_commitment × min(3, committed_kg/safety_stock_kg)` | `commitment_gamma` | 0.03 | Judgment call | Capped at 3× safety stock's worth of commitments — protects against unbounded growth if backlog balloons |
+| Regime premium | `mid × γ_regime × regime_severity` (regime_severity ∈ [0,1]: Normal=0, Delayed=Recovery=0.5, Severe=1.0) | `regime_gamma` | 0.08 | Judgment call | A direct, bounded regime signal, independent of the other four (which each already react to regime indirectly through reliability/scarcity) — captures the register §2 "regime premium" behavior the roadmap calls for explicitly |
+
+At the defaults above, worst-case combined premium (all five maxed simultaneously) adds
+roughly `mid × (0.05 + 0.15×2.00 + 0.10 + 0.03×3 + 0.08) ≈ mid × 0.62` — a severe,
+"scarcity-tier" markup, bounded rather than unbounded, deliberately smaller than the raw
+uncapped replacement-cost curve itself (§9) since a dealer eating some of that cost is
+part of the point of `replacement_cost_pass_through` < 1.0.
+
+### 12.2 Priority-allocation overlay
+
+| Parameter | Value | Meaning | Source type | Justification |
+|---|---|---|---|---|
+| Priority-overlay strictness (p) | Continuous, 0–1 (default 1.0 when the overlay is constructed at all — callers choose to enable it) | 0 = no overlay, 1 = hard DPAS-style mandate, values between = probabilistic queue preference | Model assumption | Matches the roadmap's own specification: one parameter unifying the on/off ablation and the Phase 9 sensitivity sweep |
+
+**Implementation note on "reactive, not proactive" and what "contested" means in this
+codebase:** the roadmap specifies the overlay activates "at the moment of a fill decision
+when available inventory can't cover every order competing for it in that period." In
+this project's daily-timestep architecture, contention is checked once per day: if more
+than one order arrives on the same day AND at least one is military-linked and at least
+one is civilian, a single Bernoulli(p) draw decides whether military-linked orders are
+attempted first that day (winning any physical stock that can't cover everyone). This is
+a simplification of true pairwise/continuous-time contention (the roadmap's own language)
+to fit a discrete daily loop — logged here as a scoping decision, not hidden. On days with
+only one order, or with orders from only one channel, there is nothing to contest and the
+overlay has no effect, matching "reactive, not proactive" exactly: quoting is never
+changed by the overlay, only the fill ORDER on contested days.
+
+### 12.3 Pre-registered ablation hypotheses (per the roadmap's own requirement — written before Phase 9 runs any ablation)
+
+| Component | Behavior captured | Expected consequence if removed |
+|---|---|---|
+| Scarcity premium | Protects scarce inventory | More stockouts / lower available_kg on average |
+| Replacement-cost premium | Reflects expensive replenishment | Underpricing during disruptions |
+| Shipment-risk premium | Discounts unreliable incoming supply | Excess reliance on pipeline inventory that may not arrive |
+| Commitment premium | Protects inventory already owed | Over-selling relative to standing commitments |
+| Regime premium | Direct compensation for regime severity | Quotes under-react to regime changes not already captured by the other four premiums |
+| Priority-allocation overlay (p=1 vs p=0) | Guarantees military-tagged orders are filled first on contested days | Military-linked fill rate falls toward the civilian rate on contested days specifically — tests whether pricing alone (Phase 4's elasticity effect) was already sufficient |
+
+These are written down now, before any ablation is run, so that Phase 9's results are
+read as confirming or overturning a stated prior — not as post-hoc pattern-matching.
+
+### 12.4 Findings from Phase 5 integration testing, logged honestly
+
+**A real, non-trivial result:** across 40 matched seeds, the scarcity-adjusted policy
+underperforms the naive fixed-spread baseline under CALM (Phase 3, no regime spikes)
+conditions (mean mark-to-market P&L ≈ -$110,835 vs. fixed-spread's ≈ +$48,611) — but
+becomes the BEST of the three tested policies under full Phase 4 regime stress
+(≈ -$109,545 vs. fixed-spread's ≈ -$37,803 and plain AS's ≈ -$572,992). Plain AS is worst
+in both conditions, consistent with Phase 2's already-documented thin-margin finding
+compounding under stress. This flips the Phase 2 story specifically under disruption,
+which is exactly the condition this project's core research question is about — not a
+claim that scarcity-adjustment is unconditionally better.
+
+**The priority overlay's aggregate fill-rate effect is small at tested calibrations, even
+though the underlying mechanism is verified correct.** Confirmed structurally (unit and
+integration tests: `p=1` always prioritizes military on contested days, `p=0` never does,
+intermediate `p` prioritizes probabilistically at roughly the expected rate) — but the
+AGGREGATE effect on civilian/military fill rates across a full simulation is small
+(civilian fill rate moves from ~32.85% at p=0 to ~32.78% at p=1 in the stress scenario
+used for `phase5_overlay_strictness_frontier.png`). This is because genuine SAME-DAY
+cross-channel contention (both a civilian and a military order arriving on the identical
+day, with physical stock insufficient for both) is a relatively rare subset of all
+fill/reject decisions even under stress — most outcomes are driven by price economics
+(ask vs. willingness-to-pay) or by single-channel days, not by which of two same-day
+orders gets processed first. This is the SAME underlying mechanism as Section 9's
+over-provisioning finding, resurfacing here: the reorder-point's conservative buffer keeps
+physical stock high enough, often enough, that order-level contention rarely binds.
+Reported honestly rather than tuned until it produced a more dramatic chart.
+
+**Where this leaves the research question:** military-linked orders already fill at a
+substantially higher rate than civilian ones (Phase 4's finding: ~47.5% vs. ~18.3%,
+register Section 11) through PRICING ALONE (the elasticity mechanism). This addendum
+finds the priority overlay adds comparatively little on top of that at current
+calibrations — but this is a single-point, non-statistical observation (40 seeds, one
+parameter set), not a general claim. Phase 9's proper sensitivity sweep across `p`,
+safety-stock sizing, and the military elasticity parameters together is what should
+determine whether this holds more broadly or is itself calibration-dependent.
+
+---
+
 ## Notes on how to use this table
 
 1. No parameter is added to code before it has a row here.
