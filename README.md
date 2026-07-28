@@ -67,7 +67,8 @@ model code existed, is in
 | 3 | Physical / committed / in-transit / expected inventory separation | ✅ Complete |
 | — | Addendum: military/civilian demand channel (pre-Phase 4, aggregate) | ✅ Complete |
 | 4 | Markov regimes and Hawkes demand | ✅ Complete |
-| 5 | Scarcity-adjusted market-making policy | ⏳ Not started |
+| 5 | Scarcity-adjusted market-making policy | ✅ Complete |
+| 6 | Dynamic-programming policy | ⏳ Not started |
 | 5 | Scarcity-adjusted market-making policy | ⏳ Not started |
 | 6 | Dynamic-programming policy | ⏳ Not started |
 | 7 | Sector transmission stress test | ⏳ Not started |
@@ -82,9 +83,11 @@ model code existed, is in
   value, its meaning, its source type, its justification, and its expected sensitivity.
   Section 7 logs Phase 1's concrete values; Section 8 logs Phase 2's; Section 9 logs
   Phase 3's, including two real bugs found during integration testing; Section 10 is the
-  military/civilian addendum; Section 11 is Phase 4's (regimes, sectors, Hawkes, and the
-  military price-sensitivity gap Section 10 flagged) — including a self-caught
-  inconsistency between one row's prose and its own numbers, corrected rather than hidden.
+  military/civilian addendum; Section 11 is Phase 4's; Section 12 is Phase 5's (five
+  scarcity premiums, the priority overlay, and an honest finding that the overlay's
+  aggregate effect is small at current calibrations for the same reason Section 9 already
+  flagged) — including a self-caught inconsistency between one row's prose and its own
+  numbers, corrected rather than hidden.
 - [`docs/README_honesty_paragraph.md`](docs/README_honesty_paragraph.md) — the full
   honesty statement and why it was written before any model code.
 - [`docs/phase0_research_notes.md`](docs/phase0_research_notes.md) — the public research
@@ -652,6 +655,123 @@ pricing-only policy — this project's central open question would have no first
 
 ---
 
+## Phase 5 — Scarcity-Adjusted Market-Making Policy (the project's main model)
+
+Phase 5 extends Phase 2's standard Avellaneda-Stoikov reservation price with five bounded,
+additive premiums that react to physical-market conditions no financial market-making
+model has any notion of, plus a DPAS-style priority-allocation overlay — a pure
+fill-sequence mechanism, never a pricing change — that lets this project isolate whether
+pricing alone protects military-critical supply, or whether it takes an explicit mandate.
+
+### Components built
+
+| Module | What it does | Why it's included | Key limitation |
+|---|---|---|---|
+| `src/policies/scarcity_adjusted_as.py` | Adds scarcity, replacement-cost, shipment-risk, commitment, and regime premiums to the AS reservation price — all capped, all additive, all non-negative | This project's main hypothesis needs a policy that actually reacts to the physical-market state Phases 3/4 built | Premiums only raise the ask (no genuine customer-facing bid exists yet — see Phase 1's flagged limitation, unchanged) |
+| `src/policies/priority_overlay.py` | DPAS-style rated-order logic: on days where both a civilian and a military-linked order compete for limited physical stock, military orders are attempted first with probability `p` | Isolates the "mandate" side of "does pricing alone protect military supply, or does it take a non-price rule?" | Day-level (not pairwise) contention resolution — a scoping decision for this project's discrete daily timestep, logged in the register, not hidden |
+| `src/simulation.py` (extended again) | Passes optional physical-market state (`available_kg`, `replacement_markup_frac`, `civilian_reliability`, `committed_kg`, `regime_severity`) to every policy's `quote_ask`; applies the overlay's reordering right after generating each day's orders | Every earlier mode remains byte-for-byte unchanged when the new optional args are omitted — every other policy ignores the new kwargs via `**_ignored_state` | — |
+
+### Tests
+
+27 new tests across 3 files (166 total, all passing):
+
+```
+tests/test_scarcity_adjusted_as.py   — each of the five premiums individually: direction,
+                                        magnitude, capping behavior, graceful degradation
+                                        to plain AS outside supply-chain/regime mode
+tests/test_priority_overlay.py       — p=0/p=1/intermediate-p behavior, contested-day
+                                        detection, within-channel order preservation
+tests/test_phase5_integration.py     — full Simulation runs, a regression test proving
+                                        Phase 1-4 modes are unaffected, and structural
+                                        checks against the pre-registered ablation table
+```
+
+### Pre-registered ablation hypotheses (written before Phase 9 runs anything)
+
+| Component | Behavior captured | Expected consequence if removed |
+|---|---|---|
+| Scarcity premium | Protects scarce inventory | More stockouts / lower average available inventory |
+| Replacement-cost premium | Reflects expensive replenishment | Underpricing during disruptions |
+| Shipment-risk premium | Discounts unreliable incoming supply | Excess reliance on pipeline inventory that may not arrive |
+| Commitment premium | Protects inventory already owed | Over-selling relative to standing commitments |
+| Regime premium | Direct compensation for regime severity | Quotes under-react to regime changes not already captured by the other four |
+| Priority overlay (p=1 vs p=0) | Guarantees military orders filled first on contested days | Military fill rate on contested days falls toward the civilian rate |
+
+See `docs/assumptions_register.md`, Section 12.3, for the full table — this is the
+required roadmap deliverable, written down before any ablation was run, so Phase 9's
+actual results can be read as confirming or overturning a stated prior.
+
+### Mastery checkpoint
+
+**Explain each premium in one sentence, and what breaks when it's removed:**
+- *Scarcity premium* — protects inventory as available stock nears the safety buffer;
+  without it, the policy sells too freely right up to the edge of a stockout.
+- *Replacement-cost premium* — partially passes the dealer's own rising restocking cost
+  through to customers; without it, the dealer systematically underprices during expensive
+  replenishment periods (a milder version of Phase 2's already-documented thin-margin finding).
+- *Shipment-risk premium* — charges more when the current channel is unreliable; without
+  it, the ask doesn't reflect the real chance that today's restocking won't show up.
+- *Commitment premium* — reflects inventory already owed to military-linked backorders;
+  without it, the quote ignores stock that isn't really free to sell again.
+- *Regime premium* — a direct, bounded "how bad is it right now" signal, independent of
+  the other four; without it, the quote under-reacts to regime severity that isn't already
+  captured through reliability or scarcity.
+
+**Why the priority overlay isn't a price adjustment — it's a queue-priority rule:** it
+never calls a policy's `quote_ask`, and no policy is aware it exists. "What breaks when
+it's removed" is about fill SEQUENCING on contested days, not the reservation-price
+formula — confirmed structurally: `p=0` and no-overlay-at-all produce byte-identical
+results (`test_overlay_p_zero_produces_same_fill_pattern_as_no_overlay`).
+
+**Why `p` is reactive, not proactive:** the overlay only ever changes which order gets
+attempted first on a day where genuine physical-stock contention exists between channels
+— it never causes the dealer to hold extra safety stock in advance "just in case." If it
+were proactive, it would blend into the scarcity premium's inventory-risk logic and the
+"pricing alone vs. pricing + mandate" comparison would no longer be clean.
+
+### Findings, reported honestly rather than tuned until they looked better
+
+**A real, non-trivial result:** across 40 matched seeds, the scarcity-adjusted policy
+underperforms fixed-spread under CALM conditions (mean mark-to-market P&L ≈ **-$110,835**
+vs. fixed-spread's ≈ **+$48,611**) — but becomes the BEST of the three tested policies
+under full regime stress (≈ **-$109,545** vs. fixed-spread's ≈ **-$37,803** and plain AS's
+≈ **-$572,992**). This flips the Phase 2 story specifically under disruption — exactly the
+condition this project's core research question is about. See
+`results/figures/phase5_policy_comparison.png`.
+
+**The priority overlay's aggregate effect is small at current calibrations, even though
+the mechanism is verified correct.** Structurally confirmed (p=1 always prioritizes on
+contested days, p=0 never does, intermediate p prioritizes at roughly the expected rate),
+but the AGGREGATE fill-rate effect across a full run is small (civilian fill rate moves
+from ~32.85% at p=0 to ~32.78% at p=1 — see
+`results/figures/phase5_overlay_strictness_frontier.png`). This traces back to the SAME
+root cause as Section 9's over-provisioning finding: genuine same-day cross-channel
+contention is a relatively rare subset of all fill decisions, because the reorder-point's
+conservative buffer keeps physical stock high enough, often enough, that order-level
+contention rarely actually binds. **Where this leaves the research question:**
+military-linked orders already fill at a substantially higher rate than civilian ones
+(~47.5% vs. ~18.3%, Phase 4's finding) through pricing alone — this addendum finds the
+overlay adds comparatively little on top of that at tested calibrations, but this is a
+single-point observation, not a general claim; Phase 9's proper sweep across `p` and the
+buffer-sizing parameters together is what should determine whether this holds more broadly.
+
+### Explicit Phase 5 limitations (Core Rule test)
+
+- All five premium gamma coefficients are judgment calls with no fitted data — register
+  Section 12.1, flagged for Phase 9.
+- Premiums only ever raise the ask; there's still no genuine customer-facing bid.
+- The priority overlay resolves contention at the day level, not pairwise/continuous-time.
+- The overlay's small observed effect is itself a consequence of Phase 3's already-flagged
+  over-provisioning behavior, not a new, independent limitation — worth reading alongside
+  Section 9 before drawing conclusions from any fill-rate comparison in this project.
+
+If Phase 5 were removed: there would be no policy embodying this project's core
+hypothesis, and no mechanism to test the "mandate" side of "does pricing alone protect
+military-critical supply, or does it take a non-price rule" — this project's second core
+research question would have no policy-level answer, only Phase 4's demand-side evidence.
+
+---
+
 ## Repository structure (current)
 
 ```
@@ -673,7 +793,9 @@ GaMM-RX/
 │   └── policies/
 │       ├── fixed_spread.py
 │       ├── inventory_heuristic.py
-│       └── avellaneda_stoikov.py
+│       ├── avellaneda_stoikov.py
+│       ├── scarcity_adjusted_as.py
+│       └── priority_overlay.py
 ├── tests/
 │   ├── test_price_process.py
 │   ├── test_demand.py
@@ -689,7 +811,10 @@ GaMM-RX/
 │   ├── test_military_addendum.py
 │   ├── test_regimes.py
 │   ├── test_sectors_hawkes.py
-│   └── test_phase4_integration.py
+│   ├── test_phase4_integration.py
+│   ├── test_scarcity_adjusted_as.py
+│   ├── test_priority_overlay.py
+│   └── test_phase5_integration.py
 └── results/
     └── figures/
         ├── phase1_demo_run.png
@@ -700,7 +825,9 @@ GaMM-RX/
         ├── phase3_military_vs_civilian_fill_rate.png
         ├── phase4_regime_path_and_excitation.png
         ├── phase4_sector_and_military_fill_rates.png
-        └── phase4_hawkes_clustering_demo.png
+        ├── phase4_hawkes_clustering_demo.png
+        ├── phase5_policy_comparison.png
+        └── phase5_overlay_strictness_frontier.png
 ```
 
 Modules planned by the full roadmap (`regimes.py`, `scarcity_adjusted_as.py`,
@@ -710,10 +837,14 @@ they are listed in the project roadmap as future work, not represented here as f
 
 ## Future Work
 
-- Everything in Phases 5–11 of the roadmap: the scarcity-adjusted policy (and its
-  priority-allocation overlay), dynamic programming, sector stress testing, matched Monte
-  Carlo with confidence intervals, ablation/sensitivity analysis, and qualitative
-  historical validation.
+- Everything in Phases 6–11 of the roadmap: dynamic programming, sector stress testing,
+  matched Monte Carlo with confidence intervals, ablation/sensitivity analysis, and
+  qualitative historical validation.
+- Phase 9's proper sweep across overlay strictness `p` AND the safety-stock/reorder-point
+  sizing parameters together — needed before "the overlay's effect is small" can be read
+  as anything more than a single-point observation at current calibrations.
+- A version of the priority overlay that resolves contention pairwise/continuously rather
+  than once per day — Phase 5's current scoping decision for the daily-timestep architecture.
 - Per-sector (not shared) Hawkes excitation states — Phase 4's current flagged
   simplification.
 - Folding the regime demand multiplier and Hawkes excitation into the reorder-point
