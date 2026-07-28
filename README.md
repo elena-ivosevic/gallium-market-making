@@ -69,8 +69,6 @@ model code existed, is in
 | 4 | Markov regimes and Hawkes demand | ✅ Complete |
 | 5 | Scarcity-adjusted market-making policy | ✅ Complete |
 | 6 | Dynamic-programming policy | ⏳ Not started |
-| 5 | Scarcity-adjusted market-making policy | ⏳ Not started |
-| 6 | Dynamic-programming policy | ⏳ Not started |
 | 7 | Sector transmission stress test | ⏳ Not started |
 | 8 | Statistical rigor (matched Monte Carlo, confidence intervals, holdouts) | ⏳ Not started |
 | 9 | Ablation and sensitivity analysis | ⏳ Not started |
