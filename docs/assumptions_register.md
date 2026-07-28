@@ -597,6 +597,72 @@ determine whether this holds more broadly or is itself calibration-dependent.
 
 ---
 
+## 13. Phase 6 implementation values (dynamic-programming policy)
+
+Phase 6 is explicitly flagged in the roadmap as an advanced phase whose full build is
+future work relative to the paper's core scope. Built here anyway, at a deliberately
+CONTAINED scope: the required toy Bellman prerequisite, plus a real but explicitly
+simplified finite-state DP policy solved via backward induction — not a faithful
+re-derivation of the full simulation's dynamics, which would defeat the entire point of
+finite-state DP being a tractable *approximation* (see the Phase 6 mastery checkpoint).
+
+### 13.1 Discretization (new parameters — the DP's own internal, simplified world model)
+
+| Parameter | Value | Meaning | Source type | Justification |
+|---|---|---|---|---|
+| Inventory bins | 5 bins, edges at [0, 0.5, 1.0, 2.0, 4.0] × safety_stock_kg | Discretized inventory state for the DP's state space | Model assumption | Coarse enough to keep the state space tractable (register's own curse-of-dimensionality caution), fine enough to distinguish "critical," "low," "normal," "high," "very high" |
+| DP periods | 1 per simulated day, `T_dp = n_steps` at construction | Discretized time state | Model assumption | Matches the actual simulation's daily granularity directly, avoiding an extra time-bucket rounding approximation |
+| Action markups | aggressive=1%, normal=4%, defensive=10%, stop=100%, emergency_purchase=4% (+ triggers a real order) | The five roadmap-specified actions, each mapped to a concrete ask markup | Judgment call | `normal` matches other policies' baseline (register §6); `stop`'s 100% markup is chosen to be far outside any registered WTP dispersion (§7's 5%), making a sale in that state a near-impossibility rather than literally guaranteed-zero (kept a genuine action outcome rather than a hard-coded refusal) |
+| Simplified fill-probability model | `P(Z ≥ markup/wtp_spread_frac)`, reusing §7's `wtp_spread_frac=0.05` | The DP's own internal (not the real simulation's) model of how markup affects fill probability | Model assumption, reusing an existing register value | Same closed-form logic already used to sanity-check Phase 1's demo fill rate (README) — reused here for internal consistency, not re-derived |
+| Per-period restock probability | 15%/day, independent of action (100% if action = emergency_purchase) | The DP's own simplified model of replenishment, decoupled from the real supply-chain mechanics (Phase 3) | Judgment call | The DP cannot know the real supply chain's stochastic lead times inside a tractable Bellman recursion — this is a deliberate abstraction, not an oversight |
+| Scarcity penalty | -5 (reward units) for ending a period in inventory bin 0 | Represents stockout cost inside the DP's simplified reward | Judgment call | Same qualitative role as the scarcity premium (§12.1), reduced to a single constant since the DP's reward function must stay simple enough for exact backward induction |
+| Emergency purchase cost | -8 (reward units), applied whenever action = emergency_purchase | Represents the real cost of an emergency order (register §9's emergency_cost_multiplier) inside the DP's simplified reward | Judgment call | Chosen to be smaller than the scarcity penalty's potential MULTI-PERIOD cost of staying at bin 0, so the DP has a genuine incentive to sometimes pay it |
+| Terminal value | `bin_index × 6` (reward units) | Value assigned to ending inventory at the DP's horizon | Model assumption | Encodes "ending with more inventory is worth more," the same principle as Expected/Physical inventory's economic value (§3) — magnitude chosen (via the toy example, §13.2) to be large enough that preserving high inventory can beat immediate-sale reward near the horizon, illustrating genuine dynamic (not myopic) behavior |
+
+### 13.2 Toy Bellman example (the roadmap's required prerequisite, hand-derived)
+
+Before the real DP was built, a 3-state (Low/Medium/High inventory), 2-action (Sell/Hold),
+2-period toy problem was solved BY HAND (see `src/policies/dp_toy_example.py`'s module
+docstring for the full derivation) and then confirmed to match a programmatic
+backward-induction solver bit-for-bit. Values chosen specifically so that Sell is optimal
+in every state except High inventory near the horizon, where Hold wins — because a large
+terminal value (30) for ending at High inventory outweighs Sell's larger immediate reward,
+demonstrating genuine non-myopic behavior (a purely greedy policy would pick Sell
+everywhere, since it has the higher immediate reward in every single state).
+
+### 13.3 Findings from Phase 6 integration testing, logged honestly
+
+**Discretization loss, observed directly, not just described abstractly.** At this
+project's default calibration, `aggressive`, `defensive`, and `stop` are essentially
+NEVER selected by the solved policy — `normal` dominates them in raw expected-margin
+terms (a markup 4× higher than `aggressive`'s outweighs `aggressive`'s roughly 2×-higher
+fill probability), and `defensive`/`stop`'s only real benefit (avoiding further depletion)
+provides **zero modeled value at the lowest inventory bin**, because the transition model
+floors at bin 0 regardless of action — there is no "more depleted than empty" state for a
+5-bin discretization to distinguish. This is exactly what the roadmap's own mastery
+checkpoint asks about ("what discretization loses"): the real difference between
+"just below safety stock" and "deeply negative available inventory" (Section 3's
+`available_kg`, which is explicitly allowed to go negative) is invisible to this DP's
+5-bin state space. Only `normal` and `emergency_purchase` are ever chosen in practice —
+logged here rather than silently re-tuned until the full action space looked busier.
+
+**The DP does not outperform the simpler scarcity-adjusted policy at these calibrations.**
+Across 30 matched seeds under full Phase 4 regime stress: fixed-spread ≈ **-$64,881**
+(σ≈358k), inventory heuristic ≈ **-$115,348** (σ≈345k), plain AS ≈ **-$645,522** (σ≈964k,
+worst — consistent with Phase 2's already-documented thin-margin finding compounding
+under stress), scarcity-adjusted AS ≈ **-$114,264** (σ≈111k, by far the LOWEST variance
+of any policy), dynamic programming ≈ **-$181,892** (σ≈604k). The DP is better than plain
+AS but worse than both the fixed-spread baseline and the scarcity-adjusted policy on
+average, and far more volatile than scarcity-adjusted AS specifically. This is plausibly
+explained by the DP's own documented limitations (Section 13.1): it plans against a
+FIXED reference price and a simplified internal demand/restock model that has no
+knowledge of the real simulation's jump-diffusion prices, Hawkes clustering, or the
+competing scarcity-adjusted policy's own premiums — the gap between "the world the DP was
+solved for" and "the world it actually runs in" (this module's own stated central
+limitation) shows up directly in the numbers, not just in theory.
+
+---
+
 ## Notes on how to use this table
 
 1. No parameter is added to code before it has a row here.

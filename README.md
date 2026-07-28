@@ -68,6 +68,9 @@ model code existed, is in
 | — | Addendum: military/civilian demand channel (pre-Phase 4, aggregate) | ✅ Complete |
 | 4 | Markov regimes and Hawkes demand | ✅ Complete |
 | 5 | Scarcity-adjusted market-making policy | ✅ Complete |
+| 6 | Dynamic-programming policy | ✅ Complete |
+| 7 | Sector transmission stress test | ⏳ Not started |
+| 5 | Scarcity-adjusted market-making policy | ⏳ Not started |
 | 6 | Dynamic-programming policy | ⏳ Not started |
 | 7 | Sector transmission stress test | ⏳ Not started |
 | 8 | Statistical rigor (matched Monte Carlo, confidence intervals, holdouts) | ⏳ Not started |
@@ -81,11 +84,11 @@ model code existed, is in
   value, its meaning, its source type, its justification, and its expected sensitivity.
   Section 7 logs Phase 1's concrete values; Section 8 logs Phase 2's; Section 9 logs
   Phase 3's, including two real bugs found during integration testing; Section 10 is the
-  military/civilian addendum; Section 11 is Phase 4's; Section 12 is Phase 5's (five
-  scarcity premiums, the priority overlay, and an honest finding that the overlay's
-  aggregate effect is small at current calibrations for the same reason Section 9 already
-  flagged) — including a self-caught inconsistency between one row's prose and its own
-  numbers, corrected rather than hidden.
+  military/civilian addendum; Section 11 is Phase 4's; Section 12 is Phase 5's; Section 13
+  is Phase 6's (the toy Bellman derivation, the DP's discretization parameters, and an
+  honest finding that it doesn't outperform the simpler scarcity-adjusted policy at
+  current calibrations) — including a self-caught inconsistency in Section 11.2, corrected
+  rather than hidden.
 - [`docs/README_honesty_paragraph.md`](docs/README_honesty_paragraph.md) — the full
   honesty statement and why it was written before any model code.
 - [`docs/phase0_research_notes.md`](docs/phase0_research_notes.md) — the public research
@@ -770,6 +773,120 @@ research question would have no policy-level answer, only Phase 4's demand-side 
 
 ---
 
+## Phase 6 — Dynamic Programming Policy
+
+Phase 6 is explicitly flagged in the roadmap as an advanced phase whose full build is
+future work relative to the paper's core scope. Built anyway, at a deliberately contained
+scope: the required toy Bellman prerequisite, then a real but explicitly simplified
+finite-state DP policy, solved via backward induction and deployed against the actual
+simulation — genuinely different in kind from every earlier policy, which computes a
+quote from a closed-form formula rather than a precomputed table.
+
+### Components built
+
+| Module | What it does | Why it's included | Key limitation |
+|---|---|---|---|
+| `src/policies/dp_toy_example.py` | 3-state, 2-action, 2-period toy Bellman problem, hand-derived in the module docstring and confirmed bit-for-bit against a programmatic solver | The roadmap's own required prerequisite: "do not begin the full DP model until you can solve this toy example comfortably" | Deliberately tiny — exists to build and verify understanding, not to be reused by the real policy |
+| `src/policies/dynamic_programming.py` | Discretized (inventory bin × regime × day) state space, 5 roadmap-specified actions, solved via backward induction at construction time, O(1) table lookup at runtime | This project's core hypothesis needs a policy that explicitly reasons about the future value of preserved inventory via exact optimization, not just a hand-tuned formula | Solves against its OWN simplified internal world model (fixed reference price, simplified demand/restock model) — not the real simulation's dynamics, which have no closed form to optimize against exactly |
+| `src/simulation.py` (extended again) | Passes `regime_name` (the DP's discrete state) to every policy; checks `wants_emergency_purchase()` once per day for policies that expose it | Every earlier mode remains byte-for-byte unchanged — every other policy ignores the new kwarg and lacks the emergency-purchase hook | The hook only reaches policies that implement it; nothing else changes |
+
+### Tests
+
+24 new tests across 3 files (190 total, all passing):
+
+```
+tests/test_dp_toy_example.py       — the toy problem's hand derivation confirmed exactly
+                                      against a generic backward-induction solver
+tests/test_dynamic_programming.py  — table validity, discretization edges, fill-probability
+                                      monotonicity, the emergency-purchase hook, solve-time
+                                      tractability
+tests/test_phase6_integration.py   — full Simulation runs, the emergency-purchase hook
+                                      actually reaching the supply chain, a regression test
+                                      proving Phase 1-5 modes are unaffected
+```
+
+### Mastery checkpoint
+
+**Why is finite-state DP a legitimate approximation?** Because the roadmap's own goal —
+a policy that weighs immediate profit against the future value of preserved inventory —
+only requires COMPARING actions at a coarse level of state resolution to make a
+better-than-myopic decision. The toy example proves this concretely: even a 3-state,
+2-action problem is enough to show Hold beating Sell at High inventory purely because of
+future value, despite Sell paying more immediately in every single state
+(`test_hold_is_optimal_at_high_inventory_despite_lower_immediate_reward`). You don't need
+infinite precision to capture the qualitative insight that matters.
+
+**Why is it easier than solving a continuous HJB equation?** Avellaneda-Stoikov's
+closed-form reservation price (Phase 2) IS the solution to a continuous-time HJB equation
+— but only because AS's specific assumptions (constant volatility, exponential order-flow
+intensity, no jumps, no regime-switching, no competing policies) make that HJB equation
+solvable in closed form. The real simulation has none of those properties. Finite-state
+DP sidesteps needing a closed-form HJB solution entirely: discretize the state space,
+enumerate transition probabilities under a SIMPLIFIED model, and solve backward with
+ordinary arithmetic — tractable precisely because it gives up exactness in exchange for
+not needing an analytical solution to exist at all.
+
+**What discretization loses — shown directly, not just asserted:** at this project's
+default calibration, `aggressive`, `defensive`, and `stop` are essentially never chosen
+(register Section 13.3) — `defensive`/`stop`'s only real value (avoiding further
+depletion) provides **zero benefit at the lowest inventory bin**, because the transition
+model floors at bin 0 regardless of action. There is no "more depleted than empty" state
+for a 5-bin discretization to represent, even though the real simulation's `available_kg`
+(Phase 3) is explicitly allowed to go negative and DOES carry real economic meaning there
+(the scarcity premium, Phase 5, reacts to exactly that). This is what coarse
+discretization loses: a real distinction the rest of this project treats as
+economically important, invisible to the DP's state space.
+
+**Why does adding state variables create the curse of dimensionality?** This
+implementation's state space is `5 inventory bins × 4 regimes × 252 days ≈ 5,040` states
+— trivially solvable (34ms). The roadmap's own suggested extension (a military-linked
+backlog indicator) would multiply that by however many backlog levels are tracked; adding
+sector-level demand state would multiply it again, per sector. Each additional state
+dimension multiplies the table size, and — because backward induction must enumerate
+every `(state, action, next-state)` transition — multiplies the SOLVE time by roughly the
+same factor. A state space that's trivial at 5,040 entries becomes intractable within a
+few added dimensions, not because the math changes, but because enumeration is
+inherently multiplicative in the number of state variables.
+
+### Findings, reported honestly rather than tuned until they looked better
+
+**A genuine limitation, observed directly:** the DP does not outperform the simpler
+scarcity-adjusted policy at these calibrations. Across 30 matched seeds under full regime
+stress: fixed-spread ≈ **-$64,881**, inventory heuristic ≈ **-$115,348**, plain AS ≈
+**-$645,522** (worst), scarcity-adjusted AS ≈ **-$114,264** (by far the lowest variance),
+dynamic programming ≈ **-$181,892**. The DP beats plain AS but trails both the naive
+fixed-spread baseline and the scarcity-adjusted policy on average, and is far more
+volatile than scarcity-adjusted AS specifically. This traces directly to the DP's own
+documented limitation: it plans against a fixed reference price and a simplified internal
+world model with no knowledge of the real simulation's jump-diffusion prices or Hawkes
+clustering — the gap between "the world it was solved for" and "the world it runs in"
+shows up numerically, not just in theory. See `results/figures/phase6_policy_comparison.png`
+and `results/figures/phase6_toy_bellman_solution.png`.
+
+### Explicit Phase 6 limitations (Core Rule test)
+
+- The DP's internal demand/restock/fill-probability model is a deliberate, documented
+  simplification (register Section 13.1) — it does not know about sectors, Hawkes
+  clustering, military-linked demand, or jump-diffusion prices.
+- 5 inventory bins lose real information the rest of this project treats as meaningful
+  (see mastery checkpoint above).
+- The policy table is solved once for a FIXED horizon and safety-stock configuration;
+  constructing it against a mismatched `AccountingParams` silently uses stale bin edges
+  (confirmed not to crash, but not validated to be sensible either —
+  `test_dp_policy_table_solved_for_mismatched_safety_stock_still_runs`).
+- `aggressive`, `defensive`, and `stop` are essentially never selected at default
+  parameters — flagged for Phase 9 sensitivity rather than re-tuned to look busier.
+
+If Phase 6 were removed: there would be no policy in this project that explicitly solves
+an exact optimization over the future value of preserved inventory, as opposed to
+Avellaneda-Stoikov's closed-form formula (optimal under different, continuous-time
+assumptions) — the roadmap's own stated Phase 6 goal would have no concrete
+implementation, and no direct evidence (however limited) of whether the theoretical
+appeal of dynamic programming actually pays off against this project's specific,
+non-idealized simulation dynamics.
+
+---
+
 ## Repository structure (current)
 
 ```
@@ -793,7 +910,9 @@ GaMM-RX/
 │       ├── inventory_heuristic.py
 │       ├── avellaneda_stoikov.py
 │       ├── scarcity_adjusted_as.py
-│       └── priority_overlay.py
+│       ├── priority_overlay.py
+│       ├── dp_toy_example.py
+│       └── dynamic_programming.py
 ├── tests/
 │   ├── test_price_process.py
 │   ├── test_demand.py
@@ -812,7 +931,10 @@ GaMM-RX/
 │   ├── test_phase4_integration.py
 │   ├── test_scarcity_adjusted_as.py
 │   ├── test_priority_overlay.py
-│   └── test_phase5_integration.py
+│   ├── test_phase5_integration.py
+│   ├── test_dp_toy_example.py
+│   ├── test_dynamic_programming.py
+│   └── test_phase6_integration.py
 └── results/
     └── figures/
         ├── phase1_demo_run.png
@@ -825,7 +947,9 @@ GaMM-RX/
         ├── phase4_sector_and_military_fill_rates.png
         ├── phase4_hawkes_clustering_demo.png
         ├── phase5_policy_comparison.png
-        └── phase5_overlay_strictness_frontier.png
+        ├── phase5_overlay_strictness_frontier.png
+        ├── phase6_policy_comparison.png
+        └── phase6_toy_bellman_solution.png
 ```
 
 Modules planned by the full roadmap (`regimes.py`, `scarcity_adjusted_as.py`,
@@ -835,9 +959,15 @@ they are listed in the project roadmap as future work, not represented here as f
 
 ## Future Work
 
-- Everything in Phases 6–11 of the roadmap: dynamic programming, sector stress testing,
-  matched Monte Carlo with confidence intervals, ablation/sensitivity analysis, and
-  qualitative historical validation.
+- Everything in Phases 7–11 of the roadmap: sector stress testing, matched Monte Carlo
+  with confidence intervals, ablation/sensitivity analysis, and qualitative historical
+  validation.
+- A DP whose internal world model is closer to the real simulation (finer inventory
+  discretization, price-level state, sector/military awareness) — Phase 6's current
+  version trades that fidelity away specifically to keep exact backward induction
+  tractable, per its own mastery checkpoint.
+- Retuning the DP's reward magnitudes so `aggressive`/`defensive`/`stop` are ever actually
+  selected — currently dominated by `normal` at default parameters (register Section 13.3).
 - Phase 9's proper sweep across overlay strictness `p` AND the safety-stock/reorder-point
   sizing parameters together — needed before "the overlay's effect is small" can be read
   as anything more than a single-point observation at current calibrations.
