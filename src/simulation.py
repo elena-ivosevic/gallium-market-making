@@ -133,6 +133,7 @@ from src.demand import (
 from src.accounting import DealerBook, AccountingParams
 from src.supply_chain import SupplyChain, SupplyChainParams
 from src.regimes import RegimeSwitcher, RegimeParams
+from src.policies.priority_overlay import PriorityOverlay, PriorityOverlayParams
 
 
 @dataclass
@@ -154,6 +155,7 @@ class Simulation:
         sectors: list[SectorParams] = None,
         military_elasticity: MilitaryElasticityParams = None,
         hawkes_params: HawkesParams = None,
+        priority_overlay_params: PriorityOverlayParams = None,
     ):
         self.policy = policy
         self.config = config or SimulationConfig()
@@ -214,6 +216,17 @@ class Simulation:
                                                  # result dict)
         self.regime_history: list[dict] = []    # (Phase 4) only populated in regime mode
 
+        # Phase 5: priority-allocation overlay is entirely opt-in. If
+        # priority_overlay_params is None, self.priority_overlay stays None
+        # and run() never reorders a day's fill-attempt sequence -- default
+        # arrival-order processing, unchanged from Phase 1-4.
+        overlay_seed = None if rng_seed is None else rng_seed + 4
+        self.priority_overlay = (
+            PriorityOverlay(priority_overlay_params, seed=overlay_seed)
+            if priority_overlay_params is not None
+            else None
+        )
+
         self.order_log: list[dict] = []
         self.policy_diagnostics: list[dict] = []
 
@@ -258,6 +271,11 @@ class Simulation:
                 price = self.price_process.step()
                 orders = self.order_flow.generate_orders(mid_price=price)
 
+            # Phase 5: priority-allocation overlay reorders TODAY's fill
+            # attempts (never the quote itself) -- see policies/priority_overlay.py.
+            if self.priority_overlay is not None:
+                orders = self.priority_overlay.order_sequence(orders)
+
             ask = self.policy.quote_ask(
                 mid_price=price,
                 inventory_kg=self.book.inventory_kg,
@@ -265,6 +283,23 @@ class Simulation:
                 t=t * dt,
                 T=horizon_years,
                 sigma=sigma_frac,
+                # Phase 5: optional physical-market state for
+                # ScarcityAdjustedASPolicy's five premiums (register Section
+                # 12.1). Every other policy ignores these via **_ignored_state.
+                available_kg=self.book.available_kg() if self.supply_chain is not None else None,
+                safety_stock_kg=self.book.p.safety_stock_kg,
+                replacement_markup_frac=(
+                    self.supply_chain.replacement_markup_frac(
+                        self.book.available_kg(), self.book.p.safety_stock_kg
+                    )
+                    if self.supply_chain is not None
+                    else None
+                ),
+                civilian_reliability=(
+                    self.supply_chain.p.reliability if self.supply_chain is not None else None
+                ),
+                committed_kg=self.book.tranches.committed_kg if self.supply_chain is not None else 0.0,
+                regime_severity=self._regime_severity(),
             )
 
             for order in orders:
@@ -637,3 +672,19 @@ class Simulation:
             )
         lead_time_demand_kg = demand_kg_per_day * self.supply_chain.p.lead_time_days
         return self.book.p.safety_stock_kg + lead_time_demand_kg
+
+    def _regime_severity(self) -> float:
+        """
+        (Phase 5) A bounded [0, 1] severity signal for
+        ScarcityAdjustedASPolicy's regime premium (register Section 12.1).
+        Normal=0, Delayed=Recovery=0.5, Severe=1.0 -- a coarser mapping than
+        regimes.py's own per-regime multiplier dictionaries, deliberately:
+        this premium is meant to be a simple, direct "how bad is it right
+        now" signal, distinct from (not redundant with) the other four
+        premiums, which each already react to regime indirectly through
+        reliability and scarcity. Returns 0.0 outside regime mode.
+        """
+        if self.regime_switcher is None:
+            return 0.0
+        severity_map = {"normal": 0.0, "delayed": 0.5, "severe": 1.0, "recovery": 0.5}
+        return severity_map.get(self.regime_switcher.current_regime, 0.0)
