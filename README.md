@@ -69,6 +69,10 @@ model code existed, is in
 | 4 | Markov regimes and Hawkes demand | ✅ Complete |
 | 5 | Scarcity-adjusted market-making policy | ✅ Complete |
 | 6 | Dynamic-programming policy | ✅ Complete |
+| 7 | Sector transmission stress test | ✅ Complete |
+| 8 | Statistical rigor | ⏳ Not started |
+| 5 | Scarcity-adjusted market-making policy | ⏳ Not started |
+| 6 | Dynamic-programming policy | ⏳ Not started |
 | 7 | Sector transmission stress test | ⏳ Not started |
 | 8 | Statistical rigor (matched Monte Carlo, confidence intervals, holdouts) | ⏳ Not started |
 | 9 | Ablation and sensitivity analysis | ⏳ Not started |
@@ -85,7 +89,8 @@ model code existed, is in
   is Phase 6's (the toy Bellman derivation, the DP's discretization parameters, and an
   honest finding that it doesn't outperform the simpler scarcity-adjusted policy at
   current calibrations) — including a self-caught inconsistency in Section 11.2, corrected
-  rather than hidden.
+  rather than hidden; Section 14 is Phase 7's (coverage-days windowing and the required
+  simulated-customer framing, restated verbatim there).
 - [`docs/README_honesty_paragraph.md`](docs/README_honesty_paragraph.md) — the full
   honesty statement and why it was written before any model code.
 - [`docs/phase0_research_notes.md`](docs/phase0_research_notes.md) — the public research
@@ -884,6 +889,118 @@ non-idealized simulation dynamics.
 
 ---
 
+## Phase 7 — Sector Transmission Stress Test
+
+> **Required framing, stated before any result below:** these outputs describe the
+> behavior of simulated customers under assumed demand and inventory parameters. They are
+> **not** estimates of realized industrial production or economic damage. A true
+> input-output economic study uses observed prices, quantities, and economic tables to
+> estimate real effects on real firms; this project instead examines how simulated dealer
+> decisions affect hypothetical sector customers under this project's own hand-specified
+> scenario assumptions.
+
+Phase 7 is entirely a post-processing analysis layer — every field it needs (sector,
+military-linked tag, fill type, willingness-to-pay, inventory tranches over time) was
+already being recorded by Phases 3–4 for other reasons. No simulation mechanics changed.
+
+### Components built
+
+| Module | What it does | Why it's included | Key limitation |
+|---|---|---|---|
+| `src/sector_stress_test.py` | Per-sector fill stats (with a military/civilian breakdown WITHIN each sector), rolling coverage-days, shortage-episode detection, and an "emergency willingness-to-pay" proxy | The roadmap's explicit ask: cut the military-vs-civilian comparison across all four sectors, not just within Defense & Aerospace | Coverage days and shortage episodes are computed from the dealer's one aggregate stockpile, not per-sector warehousing (there is only one physical inventory in this project) |
+
+### Tests
+
+19 new tests across 2 files (209 total, all passing):
+
+```
+tests/test_sector_stress_test.py    — each metric individually: fill-stat counting,
+                                       coverage-days windowing, shortage-episode detection
+                                       (single/multiple/still-open episodes), emergency-WTP
+tests/test_phase7_integration.py    — full multi-year simulations, addressing each of the
+                                       roadmap's specific "Questions to Answer" below
+```
+
+### Answers to the roadmap's questions (with the required framing applied throughout)
+
+**Which sectors lose access first / are most vulnerable?** Across 30 matched seeds,
+pooled fill rate by sector: Defense & Aerospace **44.5%** (highest — driven by its 70%
+military-linked share pulling the average up, not by the sector being inherently
+protected), Solar **34.3%**, Telecommunications **33.9%**, Semiconductors **33.5%**. The
+three lower-military-share sectors cluster together; Defense & Aerospace stands apart
+specifically because of composition, not sector-level favoritism.
+
+**Does the policy prioritize high-value customers?** Yes, but through composition, not
+sector identity: military-linked orders fill at 47.5–51.3% in EVERY sector, cutting
+across all four (register Section 11.6's elasticity mechanism, confirmed sector-by-sector
+here, not just in aggregate) — civilian orders in the same sectors fill at 31.6–35.2%.
+See `results/figures/phase7_sector_military_civilian_fill_rates.png`.
+
+**Does the priority overlay change which sectors lose access first, and at what cost?**
+At this project's default calibration: barely. Across 30 matched seeds in the same
+small-buffer stress scenario used for Phase 5's overlay figure, military-linked fill rate
+moved by +0.0–0.3 percentage points across all four sectors when the overlay was switched
+from off to a hard mandate, at a P&L cost of roughly **$4,200** on average. This is the
+SAME finding as Phase 5's Section 12.4 — genuine same-day cross-channel contention is rare
+even under stress, because the reorder-point's conservative buffer keeps physical stock
+available often enough that fill sequencing rarely binds. See
+`results/figures/phase7_overlay_sector_comparison.png` — reported honestly rather than
+re-run until a sector showed a bigger effect.
+
+**Does a profit-maximizing, scarcity-adjusted dealer protect military-linked commitments
+on its own, or only once the overlay is imposed?** On its own, substantially — the
+~15-18 percentage-point military-vs-civilian gap in every sector comes entirely from
+Phase 4's price-sensitivity mechanism, with no overlay active. This directly echoes Phase
+5's finding: pricing alone already does most of the work at these calibrations; the
+overlay adds comparatively little on top.
+
+**Does maximizing dealer P&L reduce total customer fill rates?** Not established either
+way by this project — `test_pooled_fill_rate_and_pnl_relationship_is_computable_across_seeds`
+confirms both quantities are computed on the same matched paths, but a genuine
+correlation analysis with confidence intervals is Phase 9's job, not asserted here as a
+single-point finding.
+
+### Additional output
+
+`results/figures/phase7_coverage_days_and_shortages.png` — physical inventory and rolling
+30-day coverage days over one run, with shortage episodes (available_kg < 0, reusing
+Section 3's own existing definition) shaded. A typical run in this stress scenario shows
+1–2 shortage episodes totaling under 10 days across a full simulated year — brief and
+early, not sustained, consistent with the reorder-point's conservative over-provisioning
+(Section 9) reasserting control quickly once triggered.
+
+### Mastery checkpoint
+
+**A true input-output economic study** uses observed prices, quantities, and real
+economic tables (national accounts, firm-level production data) to estimate how a shock
+to one industry propagates to others — it measures something that actually happened, or
+statistically infers something that plausibly would. **This project's Phase 7** instead
+generates hypothetical customers (four sectors, hand-specified arrival rates and
+willingness-to-pay distributions, register Sections 4 and 11.4) and observes how a
+simulated dealer's decisions affect THEM, inside a world built entirely from judgment
+calls and scenario assumptions (docs/README_honesty_paragraph.md). The numbers above are
+real outputs of a real, deterministic-given-its-seed simulation — but they describe that
+simulation's internal behavior, not a forecast or measurement of the actual gallium
+market or real downstream industries.
+
+### Explicit Phase 7 limitations (Core Rule test)
+
+- Coverage days and shortage episodes reflect the dealer's ONE aggregate stockpile, not
+  genuine per-sector warehousing.
+- "Emergency willingness-to-pay" is a proxy from orders that happened to need escalation,
+  not an elicited or observed valuation.
+- The overlay's small measured effect (this phase, and Phase 5) is a direct consequence of
+  Phase 3's already-documented over-provisioning behavior, not an independent new finding.
+- Everything here inherits every earlier phase's own documented limitations — this is a
+  summarization layer, not a fix for any of them.
+
+If Phase 7 were removed: Phase 4 would still show pooled sector fill rates, but nothing
+about coverage days, shortage duration/frequency, the emergency-willingness-to-pay proxy,
+or a military-vs-civilian breakdown WITHIN each individual sector — all explicit roadmap
+requirements this phase exists specifically to produce.
+
+---
+
 ## Repository structure (current)
 
 ```
@@ -902,6 +1019,7 @@ GaMM-RX/
 │   ├── supply_chain.py
 │   ├── regimes.py
 │   ├── simulation.py
+│   ├── sector_stress_test.py
 │   └── policies/
 │       ├── fixed_spread.py
 │       ├── inventory_heuristic.py
@@ -931,7 +1049,9 @@ GaMM-RX/
 │   ├── test_phase5_integration.py
 │   ├── test_dp_toy_example.py
 │   ├── test_dynamic_programming.py
-│   └── test_phase6_integration.py
+│   ├── test_phase6_integration.py
+│   ├── test_sector_stress_test.py
+│   └── test_phase7_integration.py
 └── results/
     └── figures/
         ├── phase1_demo_run.png
@@ -946,7 +1066,10 @@ GaMM-RX/
         ├── phase5_policy_comparison.png
         ├── phase5_overlay_strictness_frontier.png
         ├── phase6_policy_comparison.png
-        └── phase6_toy_bellman_solution.png
+        ├── phase6_toy_bellman_solution.png
+        ├── phase7_sector_military_civilian_fill_rates.png
+        ├── phase7_coverage_days_and_shortages.png
+        └── phase7_overlay_sector_comparison.png
 ```
 
 Modules planned by the full roadmap (`regimes.py`, `scarcity_adjusted_as.py`,
@@ -956,9 +1079,13 @@ they are listed in the project roadmap as future work, not represented here as f
 
 ## Future Work
 
-- Everything in Phases 7–11 of the roadmap: sector stress testing, matched Monte Carlo
-  with confidence intervals, ablation/sensitivity analysis, and qualitative historical
-  validation.
+- Everything in Phases 8–11 of the roadmap: matched Monte Carlo with confidence
+  intervals, ablation/sensitivity analysis, and qualitative historical validation.
+- Per-sector (not just aggregate dealer) inventory tracking — Phase 7's coverage-days
+  and shortage-episode metrics currently reflect the one shared stockpile.
+- A genuine correlation analysis between pooled fill rate and dealer P&L with confidence
+  intervals — Phase 7 only confirmed the comparison is computable; Phase 9's job to
+  actually characterize the relationship.
 - A DP whose internal world model is closer to the real simulation (finer inventory
   discretization, price-level state, sector/military awareness) — Phase 6's current
   version trades that fidelity away specifically to keep exact backward induction

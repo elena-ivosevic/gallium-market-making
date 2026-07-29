@@ -663,6 +663,30 @@ limitation) shows up directly in the numbers, not just in theory.
 
 ---
 
+## 14. Phase 7 implementation values (sector transmission stress test)
+
+Phase 7 is entirely a POST-PROCESSING analysis layer: `order_log`, `tranche_history`, and
+`regime_history` (Phases 3-4) already contain every field needed (sector, military-linked
+tag, fill type, willingness-to-pay, and inventory tranches over time). No simulation
+mechanics change; only two new judgment-call parameters are needed, both belonging to the
+analysis module rather than the simulation itself.
+
+| Parameter | Value | Meaning | Source type | Justification |
+|---|---|---|---|---|
+| Coverage-days rolling window | 30 days | Trailing window used to compute average daily consumption for the "gallium inventory coverage days" metric | Judgment call | Long enough to smooth out single-day noise, short enough to reflect a genuinely CURRENT consumption rate rather than a full-run average |
+| Stockout threshold | `available_kg < 0` (register Section 3's own existing definition, not a new parameter) | When a day counts as "in shortage" for shortage-duration/frequency tracking | Reused, not new | `available_kg` is already explicitly meaningful when negative (Section 3: "a real signal of overextension") — reusing it directly, rather than inventing a second scarcity threshold, keeps this metric consistent with everything built on `available_kg` since Phase 3 |
+
+### Required framing (per the roadmap, stated here verbatim before any results)
+
+> These outputs describe the behavior of simulated customers under assumed demand and
+> inventory parameters. They are not estimates of realized industrial production or
+> economic damage. A true input-output economic study would use observed prices,
+> quantities, and economic tables to estimate real effects on real firms; this project
+> instead examines how simulated dealer decisions affect hypothetical sector customers
+> under this project's own hand-specified scenario assumptions (docs/README_honesty_paragraph.md).
+
+---
+
 ## Notes on how to use this table
 
 1. No parameter is added to code before it has a row here.
