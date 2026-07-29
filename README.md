@@ -71,10 +71,6 @@ model code existed, is in
 | 6 | Dynamic-programming policy | ✅ Complete |
 | 7 | Sector transmission stress test | ✅ Complete |
 | 8 | Statistical rigor | ⏳ Not started |
-| 5 | Scarcity-adjusted market-making policy | ⏳ Not started |
-| 6 | Dynamic-programming policy | ⏳ Not started |
-| 7 | Sector transmission stress test | ⏳ Not started |
-| 8 | Statistical rigor (matched Monte Carlo, confidence intervals, holdouts) | ⏳ Not started |
 | 9 | Ablation and sensitivity analysis | ⏳ Not started |
 | 10 | Validation and historical framing | ⏳ Not started |
 | 11 | Germanium extension (stretch goal) | ⏳ Not started |
