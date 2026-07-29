@@ -34,7 +34,7 @@ future value of preserved inventory.
 >
 > Consequently, this model is evaluated through **internal consistency checks,
 > sensitivity analysis, simulated holdout scenarios, and qualitative comparisons with
-> known supply disruptions** — not through a historical backtest of realized
+> known supply disruptions**, not through a historical backtest of realized
 > gallium-dealer profits. Any claim in this project of the form "Policy A outperforms
 > Policy B" should be read as **"Policy A outperforms Policy B under this project's
 > stated scenario assumptions,"** with an explicit confidence interval, not as a claim
@@ -48,7 +48,7 @@ future value of preserved inventory.
 > industrial production or real economic loss.
 >
 > This project is a decision-modeling and market-microstructure exercise built on
-> defensible, clearly labeled assumptions — not a validated forecasting or trading
+> defensible, clearly labeled assumptions, not a validated forecasting or trading
 > system for the physical gallium market.
 
 The full version of this statement, along with the reasoning for writing it before any
@@ -91,20 +91,6 @@ model code existed, is in
   honesty statement and why it was written before any model code.
 - [`docs/phase0_research_notes.md`](docs/phase0_research_notes.md) — the public research
   underlying the assumptions register.
-
-## Core rule for every component in this repo
-
-Nothing belongs in the final project unless, for that component, this repo can:
-
-1. Explain what it does.
-2. Explain why it is included.
-3. Defend its assumptions.
-4. Describe its limitations.
-5. Show what happens when it is removed.
-
-If a component cannot pass that test, it belongs in the **Future Work** section below,
-not presented as a finished result.
-
 ---
 
 ## Phase 1 — Simulation Core
