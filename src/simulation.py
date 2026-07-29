@@ -123,6 +123,7 @@ individually-testable components but no actual simulation.
 """
 
 from dataclasses import dataclass, field
+import copy
 import numpy as np
 
 from src.price_process import GalliumPriceProcess, PriceProcessParams
@@ -180,8 +181,17 @@ class Simulation:
         # supply_chain_params is given, self.supply_chain stays None and
         # run() takes the exact Phase 1/2 code path, unchanged.
         supply_chain_seed = None if rng_seed is None else rng_seed + 2
+        # Phase 8 fix: deep-copy supply_chain_params before wrapping it.
+        # Regime mode (below) writes `self.supply_chain.p.reliability` and
+        # `.reliability_military` in place every day -- without this copy,
+        # that would silently mutate whatever SupplyChainParams object the
+        # CALLER passed in, corrupting it for any later reuse (e.g. a
+        # module-level "holdout scenario" object reused across many
+        # simulation runs, src/holdout_scenarios.py). Found by exactly that
+        # failure mode: a holdout scenario's reliability field was overwritten
+        # by an earlier test's regime-mode run before a later test read it.
         self.supply_chain = (
-            SupplyChain(supply_chain_params, seed=supply_chain_seed)
+            SupplyChain(copy.deepcopy(supply_chain_params), seed=supply_chain_seed)
             if supply_chain_params is not None
             else None
         )

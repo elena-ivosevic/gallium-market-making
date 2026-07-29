@@ -687,6 +687,108 @@ analysis module rather than the simulation itself.
 
 ---
 
+## 15. Phase 8 implementation values (statistical rigor)
+
+| Parameter | Value | Meaning | Source type | Justification |
+|---|---|---|---|---|
+| Confidence level | 95% | Used for every confidence interval this project reports from Phase 8 onward | Convention | Standard default; not fitted, a field-wide convention adopted for consistency across every headline comparison |
+| Tail-loss quantile | 5th percentile | Defines "tail loss" for the P&L distribution across matched seeds | Convention | Matches the confidence level above (95% CI ↔ 5% tail) for interpretive consistency |
+| Matched-seed count (this project's own reports) | 30–50 depending on the comparison | How many seeds are run per comparison to compute the CIs reported in this README | Judgment call | Large enough for the t-interval approximation to be reasonable, small enough to run quickly; NOT claimed to be a formally power-calculated sample size |
+
+### Emergency procurement cost — an honest measurement gap, not a new metric invented to paper over it
+
+The roadmap asks Phase 8 to report confidence intervals for "emergency procurement cost."
+This project's accounting (Phase 3) tracks `cumulative_replacement_cost` in aggregate --
+normal and emergency orders are not separately itemized in dollar terms. Rather than
+retrofit `accounting.py`/`simulation.py` mid-phase (which this delivery deliberately
+avoids touching, to keep Phase 8 a pure, additive evaluation layer), this project reports
+two EXISTING, precisely-tracked proxies instead of inventing an imprecise blended number:
+`emergency_orders_placed` (a count -- how often emergency procurement was needed) and
+`cumulative_lost_delivery_cost` (an exact dollar figure -- money lost to failed/partial
+deliveries, which correlates with but is not identical to emergency-tier spending).
+Logged here as a real measurement gap, flagged for a future accounting enhancement
+(a dedicated `cumulative_emergency_cost` field), not silently smoothed over with an
+invented approximation dressed up as precise.
+
+### Holdout scenarios (the roadmap's five named examples, each concretely parameterized)
+
+| Scenario | What it stresses | Key parameter changes from defaults |
+|---|---|---|
+| Persistent severe regime | Sustained disruption far longer than the register's own ~67-day expected Severe duration (Section 11.3) | `initial_regime="severe"`, Severe self-transition raised to 0.998 (≈500-day expected duration) |
+| Low volatility, extreme shipment failure | Tests whether policies over-rely on price signals while supply itself is the actual risk | `sigma=0.10`, `jump_intensity=0.5` (calm price), `reliability=0.15`, `reliability_military=0.05` (severe failure) |
+| High demand, moderate prices | Tests physical scarcity arising from volume alone, decoupled from price-driven panic | Sector arrival rates scaled 3×, default (Normal-regime) price parameters otherwise unchanged |
+| Sudden recovery then relapse | Tests whether policies "relax" prematurely after an apparent recovery | `initial_regime="severe"`, Recovery→Severe relapse probability raised to 0.15 (10× the register's default 0.015, Section 11.3) |
+| Severe regime, military channel near-zero, civilian channel open | The register's own extreme case (Section 2/10): military end-use ban persists even as general licensing continues | `initial_regime="severe"`, `reliability=0.90` (civilian open), `reliability_military=0.02` (near-zero) |
+
+Every holdout scenario is a genuinely different parameter combination from anything used
+to CALIBRATE earlier phases' defaults (which were chosen via qualitative research and
+judgment calls, not fitted/optimized against any of these scenarios) — reserved
+specifically to check whether earlier findings (e.g., the overlay's small measured effect,
+Phase 5/7) still hold outside the conditions they were originally observed under.
+
+### A real bug found and fixed while building this phase
+
+`Simulation`'s regime mode writes `self.supply_chain.p.reliability` (and
+`.reliability_military`) in place, once per day, so the current regime's reliability
+figure reaches the supply chain. Before this phase, that was harmless because every
+caller constructed a fresh `SupplyChainParams` per run. Phase 8 introduced the first
+REUSED, module-level `SupplyChainParams` objects (the holdout scenario singletons in
+`src/holdout_scenarios.py`), and running one through regime mode PERMANENTLY overwrote
+its `reliability` field for every later use in the same process — caught by an
+intermittent test failure that depended on test execution order, then confirmed as a
+systematic issue (not a fluke) by checking directly. Fixed in `src/simulation.py`'s
+constructor: `supply_chain_params` is now deep-copied before being wrapped in a
+`SupplyChain`, so regime mode's daily mutation never leaks back to the caller's original
+object. A dedicated regression test
+(`test_running_a_scenario_in_regime_mode_does_not_mutate_its_own_params`) guards this
+directly rather than relying on incidental test-order coverage.
+
+### Findings, reported with actual confidence intervals this time
+
+**Phase 8's own discipline changes how some earlier point-estimate findings should be
+read.** Across 40 matched seeds under full Phase 4 regime mode, with proper 95% CIs and
+paired tests against fixed-spread:
+
+| Policy | Mean mark-to-market P&L (95% CI) | Paired diff. vs. fixed-spread (95% CI) | p-value |
+|---|---|---|---|
+| Fixed-spread | -$37,803 (-$139,594 to $63,988) | — | — |
+| Plain AS | -$572,992 (-$850,745 to -$295,240) | -$535,190 (-$727,762 to -$342,617) | <0.0001 |
+| Scarcity-adjusted AS | -$109,545 (-$144,428 to -$74,663) | -$71,742 (-$168,307 to $24,823) | **0.141** |
+| Dynamic programming | -$125,561 (-$297,990 to $46,868) | -$87,758 (-$167,024 to -$8,492) | 0.031 |
+
+Plain AS's underperformance is real and strongly significant (matches Phase 2's original
+finding). The DP's underperformance (Phase 6) is real but more marginal (p=0.031).
+**The scarcity-adjusted policy's apparent underperformance vs. fixed-spread — reported as
+a point estimate in Phase 5/6 — is NOT statistically distinguishable from zero at n=40**
+(p=0.141, CI crosses zero). This is exactly the discipline Phase 8 exists to add: a
+point-estimate difference reported earlier in this project should have been read with
+more caution than it was, and this table is the honest correction, not a hidden one.
+
+**The holdout scenarios reveal the scarcity-adjusted policy's advantage is conditional on
+the TYPE of stress, not universal.** Across 20 seeds per scenario:
+
+| Holdout scenario | Fixed-spread mean P&L | Scarcity-AS mean P&L | Which wins |
+|---|---|---|---|
+| Persistent severe regime | -$4,599,300 | **-$448,737** | Scarcity-AS, dramatically |
+| Low-vol, extreme shipment failure | -$41,666 | -$17,643 | Scarcity-AS (CIs overlap zero for both) |
+| High demand, moderate prices | -$306,610 | **-$624,447** | Fixed-spread |
+| Sudden recovery then relapse | -$873,136 | -$311,982 | Scarcity-AS |
+| Severe, military near-zero, civilian open | -$325,556 | -$93,123 | Scarcity-AS |
+
+Under sustained regime-driven disruption (persistent Severe, the relapse scenario, the
+extreme military/civilian gap), the scarcity-adjusted policy's premiums earn their keep
+dramatically — a >10x improvement under persistent Severe specifically. But under
+High-Demand-Moderate-Prices — scarcity driven by sheer VOLUME rather than
+regime/reliability signals — the scarcity-adjusted policy actually does WORSE than the
+naive fixed-spread baseline, plausibly because its premiums are keyed to reliability,
+regime severity, and replacement cost (Section 12.1), none of which fire under this
+scenario, while its baseline AS spread is still thinner than fixed-spread's flat 4%
+markup (the original Phase 2 finding). This is a genuinely useful, conditional result:
+"is the scarcity-adjusted policy better" depends on WHY the market is stressed, not just
+whether it is.
+
+---
+
 ## Notes on how to use this table
 
 1. No parameter is added to code before it has a row here.

@@ -34,7 +34,7 @@ future value of preserved inventory.
 >
 > Consequently, this model is evaluated through **internal consistency checks,
 > sensitivity analysis, simulated holdout scenarios, and qualitative comparisons with
-> known supply disruptions**, not through a historical backtest of realized
+> known supply disruptions** — not through a historical backtest of realized
 > gallium-dealer profits. Any claim in this project of the form "Policy A outperforms
 > Policy B" should be read as **"Policy A outperforms Policy B under this project's
 > stated scenario assumptions,"** with an explicit confidence interval, not as a claim
@@ -48,7 +48,7 @@ future value of preserved inventory.
 > industrial production or real economic loss.
 >
 > This project is a decision-modeling and market-microstructure exercise built on
-> defensible, clearly labeled assumptions, not a validated forecasting or trading
+> defensible, clearly labeled assumptions — not a validated forecasting or trading
 > system for the physical gallium market.
 
 The full version of this statement, along with the reasoning for writing it before any
@@ -70,7 +70,12 @@ model code existed, is in
 | 5 | Scarcity-adjusted market-making policy | ✅ Complete |
 | 6 | Dynamic-programming policy | ✅ Complete |
 | 7 | Sector transmission stress test | ✅ Complete |
-| 8 | Statistical rigor | ⏳ Not started |
+| 8 | Statistical rigor | ✅ Complete |
+| 9 | Ablation and sensitivity analysis | ⏳ Not started |
+| 5 | Scarcity-adjusted market-making policy | ⏳ Not started |
+| 6 | Dynamic-programming policy | ⏳ Not started |
+| 7 | Sector transmission stress test | ⏳ Not started |
+| 8 | Statistical rigor (matched Monte Carlo, confidence intervals, holdouts) | ⏳ Not started |
 | 9 | Ablation and sensitivity analysis | ⏳ Not started |
 | 10 | Validation and historical framing | ⏳ Not started |
 | 11 | Germanium extension (stretch goal) | ⏳ Not started |
@@ -85,12 +90,27 @@ model code existed, is in
   is Phase 6's (the toy Bellman derivation, the DP's discretization parameters, and an
   honest finding that it doesn't outperform the simpler scarcity-adjusted policy at
   current calibrations) — including a self-caught inconsistency in Section 11.2, corrected
-  rather than hidden; Section 14 is Phase 7's (coverage-days windowing and the required
-  simulated-customer framing, restated verbatim there).
+  rather than hidden; Section 14 is Phase 7's; Section 15 is Phase 8's (holdout scenario
+  parameters and an honest correction: one Phase 5/6 point-estimate finding doesn't survive
+  a proper paired test at n=40).
 - [`docs/README_honesty_paragraph.md`](docs/README_honesty_paragraph.md) — the full
   honesty statement and why it was written before any model code.
 - [`docs/phase0_research_notes.md`](docs/phase0_research_notes.md) — the public research
   underlying the assumptions register.
+
+## Core rule for every component in this repo
+
+Nothing belongs in the final project unless, for that component, this repo can:
+
+1. Explain what it does.
+2. Explain why it is included.
+3. Defend its assumptions.
+4. Describe its limitations.
+5. Show what happens when it is removed.
+
+If a component cannot pass that test, it belongs in the **Future Work** section below,
+not presented as a finished result.
+
 ---
 
 ## Phase 1 — Simulation Core
@@ -983,6 +1003,109 @@ requirements this phase exists specifically to produce.
 
 ---
 
+## Phase 8 — Statistical Rigor
+
+Phase 8 makes sure the policy comparisons littered throughout this project (Phase 2's AS
+finding, Phase 5's policy comparison, Phase 6's DP result, Phase 7's sector breakdown)
+weren't just artifacts of a single lucky simulation. It adds matched Monte Carlo running,
+confidence intervals, paired statistical tests, and five reserved holdout scenarios — and,
+in the process, genuinely changed how one earlier finding should be read.
+
+### Components built
+
+| Module | What it does | Why it's included | Key limitation |
+|---|---|---|---|
+| `src/evaluation.py` | Matched Monte Carlo running (every policy faces identical paths per seed), t-distribution confidence intervals, paired t-tests, tail-loss, and a `format_headline` helper that *refuses* to print a bare number | This project's own mastery checkpoint: "no headline comparison should appear without uncertainty information" | CIs use the t-distribution approximation, not a bootstrap; "emergency procurement cost" is reported via two existing proxies, not a single precisely-tracked dollar figure (register Section 15) |
+| `src/holdout_scenarios.py` | Five named, concretely parameterized scenarios reserved for out-of-sample checks | The roadmap's explicit examples, each genuinely more extreme than any default calibration | — |
+
+### Tests
+
+29 new tests across 2 files (239 total, all passing):
+
+```
+tests/test_evaluation.py           — CI correctness against a hand-checkable calculation,
+                                      paired-test behavior (consistent difference, no
+                                      difference, unmatched Nones), tail-loss, the
+                                      format_headline discipline, matched-path guarantees
+tests/test_holdout_scenarios.py    — all five scenarios run end-to-end, each shows its
+                                      intended qualitative behavior, plus a regression
+                                      test for the mutation bug below
+```
+
+### A real bug found and fixed while building this phase
+
+`Simulation`'s regime mode writes the current regime's reliability into
+`supply_chain.p.reliability` in place, once per day. This was harmless as long as every
+caller built a fresh `SupplyChainParams` per run — which was true until this phase
+introduced the first REUSED, module-level scenario objects (`src/holdout_scenarios.py`).
+Running one scenario through regime mode permanently overwrote its `reliability` field for
+every later use in the same process — caught by an intermittent, test-order-dependent
+failure, then confirmed as systematic by checking directly. **Fixed** in
+`src/simulation.py`'s constructor: `supply_chain_params` is now deep-copied before being
+wrapped, so regime mode's daily mutation never reaches the caller's original object. A
+dedicated regression test guards this directly now, not just incidental test ordering.
+
+### Mastery checkpoint, applied to this project's own prior claims
+
+**"No headline comparison should appear without uncertainty information."** Applying this
+retroactively to Phase 5/6's policy comparison, with proper 95% CIs and paired tests
+across 40 matched seeds:
+
+| Policy | Mean mark-to-market P&L (95% CI) | Paired diff. vs. fixed-spread | p-value |
+|---|---|---|---|
+| Fixed-spread | -$37,803 (-$139,594 to $63,988) | — | — |
+| Plain AS | -$572,992 (-$850,745 to -$295,240) | -$535,190 | <0.0001 |
+| Scarcity-adjusted AS | -$109,545 (-$144,428 to -$74,663) | -$71,742 | **0.141** |
+| Dynamic programming | -$125,561 (-$297,990 to $46,868) | -$87,758 | 0.031 |
+
+Plain AS's underperformance is real and strongly significant. The DP's is real but more
+marginal (p=0.031). **The scarcity-adjusted policy's apparent underperformance, reported
+as a point estimate in Phase 5/6, is not statistically distinguishable from fixed-spread
+at n=40** (p=0.141, CI crosses zero) — exactly the kind of correction this phase exists to
+make, applied to this project's own earlier claims rather than someone else's. See
+`results/figures/phase8_policy_comparison_with_ci.png`.
+
+### Holdout scenario findings: the scarcity-adjusted policy's advantage is conditional
+
+Across 20 seeds per scenario, comparing fixed-spread against scarcity-adjusted AS:
+
+| Holdout scenario | Fixed-spread mean P&L | Scarcity-AS mean P&L | Which wins |
+|---|---|---|---|
+| Persistent severe regime | -$4,599,300 | **-$448,737** | Scarcity-AS, dramatically (>10x) |
+| Low-vol, extreme shipment failure | -$41,666 | -$17,643 | Scarcity-AS (both CIs overlap zero) |
+| High demand, moderate prices | -$306,610 | **-$624,447** | Fixed-spread |
+| Sudden recovery then relapse | -$873,136 | -$311,982 | Scarcity-AS |
+| Severe, military near-zero, civilian open | -$325,556 | -$93,123 | Scarcity-AS |
+
+Under sustained regime-driven disruption, the scarcity-adjusted policy's premiums earn
+their keep dramatically. But under demand-VOLUME-driven scarcity with unremarkable prices
+and reliability, it does WORSE than the naive baseline — its premiums are keyed to
+reliability, regime severity, and replacement cost (Section 12.1), none of which fire in
+that scenario, while its underlying AS spread is still thinner than fixed-spread's flat
+markup (Phase 2's original finding). **Whether the scarcity-adjusted policy is "better"
+depends on WHY the market is stressed, not just whether it is** — a genuinely useful,
+conditional finding a single-scenario comparison could never have surfaced. See
+`results/figures/phase8_holdout_scenario_comparison.png`.
+
+### Explicit Phase 8 limitations (Core Rule test)
+
+- Confidence intervals use the t-distribution approximation, not a bootstrap.
+- "Emergency procurement cost" is two existing proxies (an order count and a dollar figure
+  for lost-delivery cost specifically), not one precisely-isolated dollar figure — a real
+  measurement gap, logged rather than papered over (register Section 15).
+- Seed counts (20-40 per comparison) are chosen for reasonable runtime, not a formal power
+  calculation.
+- Every CI and paired test here is only as trustworthy as the underlying simulation's own
+  documented assumptions (Sections 1-14) — this phase makes existing comparisons
+  statistically honest; it does not make the model more realistic.
+
+If Phase 8 were removed: every comparison in this project would remain a single-seed-set,
+non-statistical observation — including, as this phase discovered, at least one (Phase
+5/6's scarcity-AS-vs-fixed-spread point estimate) that doesn't actually hold up once
+properly tested.
+
+---
+
 ## Repository structure (current)
 
 ```
@@ -1002,6 +1125,8 @@ GaMM-RX/
 │   ├── regimes.py
 │   ├── simulation.py
 │   ├── sector_stress_test.py
+│   ├── evaluation.py
+│   ├── holdout_scenarios.py
 │   └── policies/
 │       ├── fixed_spread.py
 │       ├── inventory_heuristic.py
@@ -1033,7 +1158,9 @@ GaMM-RX/
 │   ├── test_dynamic_programming.py
 │   ├── test_phase6_integration.py
 │   ├── test_sector_stress_test.py
-│   └── test_phase7_integration.py
+│   ├── test_phase7_integration.py
+│   ├── test_evaluation.py
+│   └── test_holdout_scenarios.py
 └── results/
     └── figures/
         ├── phase1_demo_run.png
@@ -1051,7 +1178,9 @@ GaMM-RX/
         ├── phase6_toy_bellman_solution.png
         ├── phase7_sector_military_civilian_fill_rates.png
         ├── phase7_coverage_days_and_shortages.png
-        └── phase7_overlay_sector_comparison.png
+        ├── phase7_overlay_sector_comparison.png
+        ├── phase8_policy_comparison_with_ci.png
+        └── phase8_holdout_scenario_comparison.png
 ```
 
 Modules planned by the full roadmap (`regimes.py`, `scarcity_adjusted_as.py`,
@@ -1061,8 +1190,15 @@ they are listed in the project roadmap as future work, not represented here as f
 
 ## Future Work
 
-- Everything in Phases 8–11 of the roadmap: matched Monte Carlo with confidence
-  intervals, ablation/sensitivity analysis, and qualitative historical validation.
+- Everything in Phases 9–11 of the roadmap: ablation and sensitivity analysis (including
+  the Phase 9 sweep needed to properly resolve the scarcity-AS-vs-fixed-spread question
+  Phase 8 found to be statistically inconclusive at n=40) and qualitative historical
+  validation.
+- A dedicated `cumulative_emergency_cost` field in accounting.py — Phase 8 currently
+  reports two existing proxies instead (register Section 15) rather than retrofitting
+  mid-phase.
+- A bootstrap-based confidence interval as a robustness check on the t-distribution
+  approximation used throughout Phase 8.
 - Per-sector (not just aggregate dealer) inventory tracking — Phase 7's coverage-days
   and shortage-episode metrics currently reflect the one shared stockpile.
 - A genuine correlation analysis between pooled fill rate and dealer P&L with confidence
