@@ -1,4 +1,4 @@
-# Assumptions Register — GaMM-RX (Gallium Market-Making with Regime & eXposure modeling)
+# Assumptions Register | Gallium Under Constraint
 
 Every numerical or structural assumption used anywhere in this project must have a row
 here before it is used in code. If a parameter changes during development, update its row
@@ -558,42 +558,23 @@ changed by the overlay, only the fill ORDER on contested days.
 These are written down now, before any ablation is run, so that Phase 9's results are
 read as confirming or overturning a stated prior — not as post-hoc pattern-matching.
 
-### 12.4 Findings from Phase 5 integration testing, logged honestly
+### 12.4 Findings from Phase 5 Integration Testing, Updated After Phase 8 Statistical Evaluation
 
-**A real, non-trivial result:** across 40 matched seeds, the scarcity-adjusted policy
-underperforms the naive fixed-spread baseline under CALM (Phase 3, no regime spikes)
-conditions (mean mark-to-market P&L ≈ -$110,835 vs. fixed-spread's ≈ +$48,611) — but
-becomes the BEST of the three tested policies under full Phase 4 regime stress
-(≈ -$109,545 vs. fixed-spread's ≈ -$37,803 and plain AS's ≈ -$572,992). Plain AS is worst
-in both conditions, consistent with Phase 2's already-documented thin-margin finding
-compounding under stress. This flips the Phase 2 story specifically under disruption,
-which is exactly the condition this project's core research question is about — not a
-claim that scarcity-adjustment is unconditionally better.
+Across 40 matched seeds under calm Phase 3 conditions, the scarcity-adjusted policy underperforms the fixed-spread baseline in mean mark-to-market P&L, producing approximately -$110,835 compared with approximately +$48,611 for fixed spread.
 
-**The priority overlay's aggregate fill-rate effect is small at tested calibrations, even
-though the underlying mechanism is verified correct.** Confirmed structurally (unit and
-integration tests: `p=1` always prioritizes military on contested days, `p=0` never does,
-intermediate `p` prioritizes probabilistically at roughly the expected rate) — but the
-AGGREGATE effect on civilian/military fill rates across a full simulation is small
-(civilian fill rate moves from ~32.85% at p=0 to ~32.78% at p=1 in the stress scenario
-used for `phase5_overlay_strictness_frontier.png`). This is because genuine SAME-DAY
-cross-channel contention (both a civilian and a military order arriving on the identical
-day, with physical stock insufficient for both) is a relatively rare subset of all
-fill/reject decisions even under stress — most outcomes are driven by price economics
-(ask vs. willingness-to-pay) or by single-channel days, not by which of two same-day
-orders gets processed first. This is the SAME underlying mechanism as Section 9's
-over-provisioning finding, resurfacing here: the reorder-point's conservative buffer keeps
-physical stock high enough, often enough, that order-level contention rarely binds.
-Reported honestly rather than tuned until it produced a more dramatic chart.
+Under the full Phase 4 regime environment, the fixed-spread policy also has the highest point estimate among the three policies initially evaluated:
 
-**Where this leaves the research question:** military-linked orders already fill at a
-substantially higher rate than civilian ones (Phase 4's finding: ~47.5% vs. ~18.3%,
-register Section 11) through PRICING ALONE (the elasticity mechanism). This addendum
-finds the priority overlay adds comparatively little on top of that at current
-calibrations — but this is a single-point, non-statistical observation (40 seeds, one
-parameter set), not a general claim. Phase 9's proper sensitivity sweep across `p`,
-safety-stock sizing, and the military elasticity parameters together is what should
-determine whether this holds more broadly or is itself calibration-dependent.
+| Policy                               | Mean mark-to-market P&L |
+| ------------------------------------ | ----------------------: |
+| Fixed spread                         |                -$37,803 |
+| Scarcity-adjusted Avellaneda-Stoikov |               -$109,545 |
+| Standard Avellaneda-Stoikov          |               -$572,992 |
+
+Phase 8 subsequently evaluated these results using 95 percent confidence intervals and paired statistical tests. The scarcity-adjusted policy's paired difference from fixed spread was -$71,742, with a 95 percent confidence interval from -$168,307 to $24,823 and a p-value of 0.141. The difference is therefore not statistically distinguishable from zero at 40 seeds.
+
+Standard Avellaneda-Stoikov materially underperforms fixed spread, with a paired difference of approximately -$535,190 and a p-value below 0.0001. This is consistent with the previously documented finding that its calibrated spread is too narrow relative to physical replenishment costs.
+
+The correct interpretation is not that scarcity adjustment is universally superior under stress. Its performance depends on the source and persistence of the disruption. Phase 8's reserved holdout scenarios show that the scarcity-adjusted policy produces a higher mean P&L than fixed spread in four of five scenarios, particularly when stress is driven by persistent regime deterioration, shipment failure, or military-channel supply restrictions. It underperforms when scarcity is driven primarily by elevated demand while its observed supply-risk signals remain moderate.
 
 ---
 
