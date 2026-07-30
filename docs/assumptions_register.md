@@ -789,6 +789,80 @@ whether it is.
 
 ---
 
+## 16. Phase 9 implementation values (ablation and sensitivity analysis)
+
+### 16.1 Tornado chart low/high bounds
+
+Every bound below is either an ALREADY-REGISTERED alternative value used elsewhere in
+this project, or a symmetric ±50% perturbation of the registered default where no other
+internal alternative exists. None were chosen after seeing the sweep's result.
+
+| Parameter | Default | Low | High | Bound source |
+|---|---|---|---|---|
+| Risk aversion (γ) | 3.5e-6 | 1.75e-6 (−50%) | 5.25e-6 (+50%) | Symmetric perturbation (§8) |
+| Jump intensity | 3.0/yr | 1.5/yr (−50%) | 4.5/yr (+50%) | Symmetric perturbation (§7) |
+| Jump size (up/down scale) | 0.18 / 0.07 | 0.09 / 0.035 (−50%) | 0.27 / 0.105 (+50%) | Symmetric perturbation (§7) |
+| Shipment reliability (civilian/military) | 0.95 / 0.75 | 0.475 / 0.375 (−50%) | 0.95 / 0.75 (default, i.e. Low is the stress case) | Low matches §8's stressed-reliability demo scenario order of magnitude |
+| Shipment lead time | 14 days | 7 days (−50%) | 28 days (+100%) | Symmetric-in-spirit perturbation (§9); asymmetric bound because a negative lead time is meaningless |
+| Safety stock | 60 kg | 30 kg (−50%) | 120 kg (+100%) | Same asymmetric-bound logic as lead time |
+| Hawkes excitation | Regime-dependent dict | ×0.5 every regime | ×1.5 every regime | Symmetric perturbation (§11.7) |
+| Hawkes decay rate | 8.0/yr | 16.0/yr (faster decay, shorter memory) | 4.0/yr (slower decay, longer memory) | Symmetric-in-spirit perturbation (§11.7); framed as decay SPEED, so bounds are inverted relative to the rate number |
+| Sector demand (all arrival rates) | §11.4 defaults | ×0.5 | ×1.5 | Symmetric perturbation |
+| Replacement-cost curvature | 2.0 | 1.0 (−50%) | 3.0 (+50%) | Symmetric perturbation (§9) |
+| Military-linked demand share (all sectors) | §11.4 defaults | ×0.5 | ×1.5 (capped at 100%) | Symmetric perturbation |
+
+### 16.2 A real bug found while building the sensitivity sweep
+
+An early version of the `shipment_reliability` tornado row overrode only `SupplyChainParams
+.reliability`/`.reliability_military`. Because regime mode (Phase 4) OVERWRITES those exact
+fields every single day from `RegimeSwitcher`'s own reliability dict
+(`src/simulation.py`'s regime-mode loop), the override had **zero effect** — confirmed
+directly by comparing low/high P&L arrays and finding them byte-identical, not just
+similar. Fixed by also scaling `RegimeParams.civilian_reliability`/`.military_reliability`
+(`src/sensitivity.py`'s `_scaled_reliability_regime_params`), since that is the dict
+`Simulation` actually reads from once regime mode is active. A dedicated regression test
+(`test_shipment_reliability_override_actually_changes_results`) checks this directly —
+this is the second time a "params silently overwritten by regime mode" bug has been found
+in this project (the first, Phase 8's mutation bug, was a different mechanism: leaking
+OUT to a shared caller object, rather than being overwritten by regime mode internally).
+
+### 16.3 Ablation results (seeds=20, n_steps=252, matched)
+
+| Variant | Mean mark-to-market P&L | Diff. from full model | Effect size |
+|---|---|---|---|
+| Full model | -$118,031 | — | — |
+| No Hawkes | -$118,946 | -$915 | Negligible |
+| No regime switching | -$132,820 | -$14,790 | Small-moderate |
+| No shipment-risk premium | -$163,360 | **-$45,329** | **Largest single-premium effect** |
+| No replacement-cost premium | -$133,936 | -$15,905 | Small-moderate |
+| No commitment premium | -$118,031 | **$0** (exact) | None measurable |
+| No scarcity premium | -$122,491 | -$4,460 | Negligible-small |
+| No priority overlay (p=0 vs p=1) | -$118,031 | **$0** (exact) | None measurable |
+| Standard AS (no premiums, no overlay) | -$545,515 | **-$427,484** | **By far the largest ablation effect** |
+
+**A genuine surprise, not predicted going in:** the shipment-risk premium has the largest
+effect of any SINGLE premium — larger than removing regime switching entirely — which was
+not obvious from Phase 5's pre-registered hypotheses (Section 12.3), each written as an
+independent, equally-weighted prediction. The commitment premium and priority overlay
+show EXACTLY zero measurable effect (not just small — the two means are numerically
+identical), directly confirming the over-provisioning root cause flagged since Section 9:
+these two mechanisms specifically depend on genuine physical contention/backlog, which
+essentially never occurs at default calibration. Removing ALL scarcity-adjustment
+machinery at once (Standard AS) costs far more than the sum of the individual premium
+ablations — the premiums matter collectively more than any one of them matters alone.
+
+### 16.4 Priority-overlay strictness frontier (register Section 12.2, swept continuously)
+
+Confirms Phase 5 and Phase 7's finding again, now with Phase 8-grade confidence intervals
+at each of five `p` values (0, 0.25, 0.5, 0.75, 1.0): both the military-linked fill-rate
+curve and the P&L curve are close to FLAT across the full range of `p`, with overlapping
+CIs at adjacent points — the overlay does not trade away meaningful P&L for meaningful
+fill-rate protection at this project's default calibration, because (per Section 9's
+already-established root cause) genuine same-day cross-channel contention is rare. See
+`results/figures/phase9_overlay_frontier.png`.
+
+---
+
 ## Notes on how to use this table
 
 1. No parameter is added to code before it has a row here.

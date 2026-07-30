@@ -71,7 +71,8 @@ model code existed, is in
 | 6 | Dynamic-programming policy | ✅ Complete |
 | 7 | Sector transmission stress test | ✅ Complete |
 | 8 | Statistical rigor | ✅ Complete |
-| 9 | Ablation and sensitivity analysis | ⏳ Not started |
+| 9 | Ablation and sensitivity analysis | ✅ Complete |
+| 10 | Validation and historical framing | ⏳ Not started |
 | 5 | Scarcity-adjusted market-making policy | ⏳ Not started |
 | 6 | Dynamic-programming policy | ⏳ Not started |
 | 7 | Sector transmission stress test | ⏳ Not started |
@@ -92,7 +93,9 @@ model code existed, is in
   current calibrations) — including a self-caught inconsistency in Section 11.2, corrected
   rather than hidden; Section 14 is Phase 7's; Section 15 is Phase 8's (holdout scenario
   parameters and an honest correction: one Phase 5/6 point-estimate finding doesn't survive
-  a proper paired test at n=40).
+  a proper paired test at n=40); Section 16 is Phase 9's (the actual pre-registered
+  ablation results, a tornado chart, and a second regime-mode override bug found the same
+  way as Phase 8's).
 - [`docs/README_honesty_paragraph.md`](docs/README_honesty_paragraph.md) — the full
   honesty statement and why it was written before any model code.
 - [`docs/phase0_research_notes.md`](docs/phase0_research_notes.md) — the public research
@@ -1106,6 +1109,137 @@ properly tested.
 
 ---
 
+## Phase 9 — Ablation and Sensitivity Analysis
+
+Phase 9 actually runs the ablation table that was pre-registered back in Phase 5 (register
+Section 12.3, written before any ablation existed), sweeps eleven named parameters for a
+tornado chart, and re-runs the priority-overlay strictness frontier with proper Phase 8
+confidence intervals. It also found and fixed a second real bug in how regime mode
+silently overrides parameters — a different mechanism from Phase 8's mutation bug, but
+the same family of mistake.
+
+### Components built
+
+| Module | What it does | Why it's included | Key limitation |
+|---|---|---|---|
+| `src/ablation.py` | Builds and runs the nine variants from Phase 5's pre-registered table, on matched seeds | Confirms or overturns a prior stated BEFORE this phase existed, not a post-hoc pattern-match | Single-component ablations only — no combinations tested |
+| `src/sensitivity.py` | LOW/HIGH sweeps for eleven named parameters (tornado chart data) plus a continuous 0-1 sweep of overlay strictness `p` | The roadmap's explicit ask: which assumptions matter most, and the full price-vs-mandate frontier, not just its endpoints | One-at-a-time design — cannot detect interaction effects between parameters |
+
+### Tests
+
+20 new tests across 2 files (259 total, all passing):
+
+```
+tests/test_ablation.py       — all nine variants present and correctly isolate exactly
+                                one component each, matched-seed guarantee, independent-
+                                object guard against the Phase 8 mutation-bug family
+tests/test_sensitivity.py    — all eleven parameters present, tornado sorting, CI
+                                presence, and a dedicated regression test for the
+                                regime-override bug found while building this phase
+```
+
+### A second real bug, a different mechanism from Phase 8's, found the same way
+
+Phase 8 found a bug where regime mode's daily writes to `supply_chain.p.reliability`
+LEAKED OUT to a shared caller object. Building this phase's `shipment_reliability`
+tornado row surfaced a related but distinct problem: overriding
+`SupplyChainParams.reliability` has **no effect at all** in regime mode, because
+`RegimeSwitcher`'s own reliability dict OVERWRITES it fresh every day regardless of what
+the caller passed in — not a leak this time, but a silent no-op. Caught the same way as
+Phase 8's bug: a suspiciously clean result (the low and high P&L arrays were byte-for-byte
+identical, not just similar) prompted a direct check rather than trusting the number.
+Fixed by scaling `RegimeParams.civilian_reliability`/`.military_reliability` instead
+(`src/sensitivity.py`'s `_scaled_reliability_regime_params`), with a dedicated regression
+test. Two bugs in the same family (regime mode silently overriding caller expectations) in
+two consecutive phases is itself worth noting: anyone extending this project to sweep a
+supply-chain parameter under regime mode should check this first.
+
+### Ablation results: the pre-registered table, actually run
+
+20 matched seeds, 252 days, full Phase 4 regime mode:
+
+| Variant | Mean mark-to-market P&L | Diff. from full model |
+|---|---|---|
+| Full model | -$118,031 | — |
+| No Hawkes | -$118,946 | -$915 (negligible) |
+| No regime switching | -$132,820 | -$14,790 (small-moderate) |
+| No shipment-risk premium | -$163,360 | **-$45,329 (largest single-premium effect)** |
+| No replacement-cost premium | -$133,936 | -$15,905 (small-moderate) |
+| No commitment premium | -$118,031 | **$0, exact** |
+| No scarcity premium | -$122,491 | -$4,460 (negligible-small) |
+| No priority overlay (p=0 vs p=1) | -$118,031 | **$0, exact** |
+| Standard AS (no premiums, no overlay) | -$545,515 | **-$427,484 (by far the largest)** |
+
+**A genuine surprise:** the shipment-risk premium — not the scarcity premium — has the
+largest effect of any single premium, bigger than removing regime switching entirely.
+Phase 5's pre-registered hypotheses treated all five premiums as independent, equally-
+weighted predictions; this result says they weren't equally important. The commitment
+premium and priority overlay show EXACTLY zero measurable effect — not approximately
+zero, numerically identical means — directly confirming the over-provisioning root cause
+flagged since Phase 3 (register Section 9): both mechanisms specifically depend on
+genuine physical contention or backlog, which essentially never occurs at default
+calibration. And removing every premium at once (Standard AS) costs far more than the
+sum of the individual ablations — the premiums matter collectively more than individually.
+
+### Tornado chart: which assumption matters most
+
+![Tornado chart](results/figures/phase9_tornado_chart.png)
+
+Shipment reliability dominates by a wide margin (swing ≈ $271,000 — more than double the
+next-largest driver, risk aversion at ≈ $123,000). Hawkes excitation, jump size, and
+Hawkes decay show the smallest swings of the eleven — consistent with Phase 4/6's own
+findings that clustering effects, while structurally real and individually testable, have
+modest aggregate P&L impact next to supply-side reliability. This is exactly the register
+Section 1 discipline being honored: several of these parameters were pre-flagged
+"Sensitivity: High" back in Phase 0 on judgment alone — this chart is what confirms or
+revises that prior with an actual result, not just restates it.
+
+### Priority-overlay strictness frontier, with real confidence intervals this time
+
+![Overlay frontier](results/figures/phase9_overlay_frontier.png)
+
+Both curves are flat within their confidence intervals across the full 0-to-1 range of
+`p` (military fill rate: 51.9% ± ~3.7pp at every single point; mean P&L: -$118,031,
+identical to six figures at every point). This is the same finding as Phase 5/7, now
+confirmed with Phase 8-grade statistical treatment rather than a single-scenario
+observation: at default calibration, the overlay simply has nothing to trade off, because
+genuine same-day cross-channel contention is rare enough that sweeping its strictness
+changes essentially nothing.
+
+### Mastery checkpoint
+
+**Which parameter matters most?** Shipment reliability, by a wide margin — the tornado
+chart's largest swing, more than double the second-largest.
+
+**Which matters least?** Hawkes excitation and hawkes decay show the smallest tornado
+swings; the commitment premium and priority overlay show literally zero measurable
+ablation effect at default calibration.
+
+**Which changes the conclusion, not just the magnitude?** Removing shipment reliability's
+protective range (the tornado's low end) pushes mean P&L to roughly -$509,000 to
+-$237,000 — a regime where EVERY policy in this project's Phase 8 comparison would
+plausibly look bad, not just a magnitude shift. Standard AS in the ablation table is
+similar: it doesn't just make the result "a bit worse," it erases most of the reason the
+scarcity-adjusted policy exists. Everything else in these tables — Hawkes, individual
+premiums in isolation, overlay strictness — changes magnitude at most, not the qualitative
+story.
+
+### Explicit Phase 9 limitations (Core Rule test)
+
+- One-at-a-time sensitivity design; no interaction effects captured (register Section 16.1).
+- Tornado and overlay-sweep seed counts (15-20) are smaller than Phase 8's headline
+  comparisons (30-40) — rankings are indicative, not each individually significance-tested.
+- Ablation variants test single-component removal only, never combinations.
+- Every result here inherits every earlier phase's own documented limitations (Sections
+  1-15) — this phase measures sensitivity of an already-simplified model, not of reality.
+
+If Phase 9 were removed: Phase 5's pre-registered ablation table would remain untested
+predictions, none of the register's many "Sensitivity: High" judgment-call flags (present
+since Phase 0) would have any actual evidence behind them, and the priority-overlay
+frontier would remain a single-scenario observation rather than a properly-bounded result.
+
+---
+
 ## Repository structure (current)
 
 ```
@@ -1127,6 +1261,8 @@ GaMM-RX/
 │   ├── sector_stress_test.py
 │   ├── evaluation.py
 │   ├── holdout_scenarios.py
+│   ├── ablation.py
+│   ├── sensitivity.py
 │   └── policies/
 │       ├── fixed_spread.py
 │       ├── inventory_heuristic.py
@@ -1160,7 +1296,9 @@ GaMM-RX/
 │   ├── test_sector_stress_test.py
 │   ├── test_phase7_integration.py
 │   ├── test_evaluation.py
-│   └── test_holdout_scenarios.py
+│   ├── test_holdout_scenarios.py
+│   ├── test_ablation.py
+│   └── test_sensitivity.py
 └── results/
     └── figures/
         ├── phase1_demo_run.png
@@ -1180,7 +1318,9 @@ GaMM-RX/
         ├── phase7_coverage_days_and_shortages.png
         ├── phase7_overlay_sector_comparison.png
         ├── phase8_policy_comparison_with_ci.png
-        └── phase8_holdout_scenario_comparison.png
+        ├── phase8_holdout_scenario_comparison.png
+        ├── phase9_tornado_chart.png
+        └── phase9_overlay_frontier.png
 ```
 
 Modules planned by the full roadmap (`regimes.py`, `scarcity_adjusted_as.py`,
@@ -1190,10 +1330,16 @@ they are listed in the project roadmap as future work, not represented here as f
 
 ## Future Work
 
-- Everything in Phases 9–11 of the roadmap: ablation and sensitivity analysis (including
-  the Phase 9 sweep needed to properly resolve the scarcity-AS-vs-fixed-spread question
-  Phase 8 found to be statistically inconclusive at n=40) and qualitative historical
-  validation.
+- Everything in Phases 10-11 of the roadmap: qualitative historical validation and the
+  results dashboard.
+- A full-factorial or Sobol-index sensitivity analysis — Phase 9's one-at-a-time design
+  cannot detect interaction effects between parameters (e.g., whether safety stock only
+  matters when reliability is also low).
+- Combination ablations (e.g., "no Hawkes AND no scarcity premium together") — Phase 9
+  only tested single-component removal.
+- Larger seed counts for the tornado chart and overlay frontier (currently 15-20,
+  smaller than Phase 8's headline 30-40) if the rankings need to hold to a formal
+  significance threshold rather than serve as an indicative ordering.
 - A dedicated `cumulative_emergency_cost` field in accounting.py — Phase 8 currently
   reports two existing proxies instead (register Section 15) rather than retrofitting
   mid-phase.
