@@ -72,8 +72,7 @@ model code existed, is in
 | 7 | Sector transmission stress test | ✅ Complete |
 | 8 | Statistical rigor | ✅ Complete |
 | 9 | Ablation and sensitivity analysis | ✅ Complete |
-| 10 | Validation and historical framing | ⏳ Not started |
-| 11 | Germanium extension (stretch goal) | ⏳ Not started |
+| 10 | Validation and historical framing | ✅ Complete |
 
 ## Documentation index
 
@@ -90,6 +89,9 @@ model code existed, is in
   a proper paired test at n=40); Section 16 is Phase 9's (the actual pre-registered
   ablation results, a tornado chart, and a second regime-mode override bug found the same
   way as Phase 8's).
+- Section 17 is Phase 10's — the full validation checklist plus a genuine finding (not a
+  bug) about why scarcity/stockouts don't rise under a pinned-Severe regime once the
+  scarcity-adjusted policy's own pricing response is accounted for.
 - [`docs/README_honesty_paragraph.md`](docs/README_honesty_paragraph.md) — the full
   honesty statement and why it was written before any model code.
 - [`docs/phase0_research_notes.md`](docs/phase0_research_notes.md) — the public research
@@ -1234,6 +1236,114 @@ frontier would remain a single-scenario observation rather than a properly-bound
 
 ---
 
+## Phase 10 — Validation and Historical Framing
+
+> **Required language, stated before any result below:** historical events are used here
+> to assess directional plausibility, not to claim that the model has been calibrated to
+> realized dealer prices or profits.
+
+Phase 10 consolidates the roadmap's mathematical-relationship and edge-case checklist —
+several already implicitly covered by earlier phases' own tests — into one explicit report,
+plus a qualitative consistency check against the real 2023-2025 gallium export-control
+episode. It also surfaced a genuinely interesting result rather than a clean pass-through.
+
+### Components built
+
+| Module | What it does | Why it's included |
+|---|---|---|
+| `src/validation.py` | Runs all 8 mathematical-relationship checks, all 8 edge-case checks, and the 5-part qualitative historical consistency check, each returning pass/fail plus evidence | The roadmap's own explicit checklist, confirmed in one place rather than scattered across phase-specific tests |
+
+### Tests
+
+12 new tests (271 total, all passing) in `tests/test_validation.py`, wrapping every check
+above plus a dedicated test confirming the mechanism behind the two qualitative checks
+that don't hold in the naively-expected direction (see below).
+
+### Mathematical relationships — all 8 pass
+
+More inventory lowers the reservation price; higher volatility widens the spread; less
+time remaining weakens the standard inventory adjustment; higher jump intensity increases
+price variance; greater commitments raise the reservation price; lower reliability raises
+the shipment-risk premium; lower available inventory raises the scarcity premium. The
+overlay-at-Severe check is worth calling out specifically: at a REGIME PINNED to Severe
+forever, military fill rate beats civilian by **21.7% vs. 0.3%** — a stark, obvious gap,
+in contrast to Phase 5/7's finding that the overlay's effect is small at *default*
+calibration. Pinning the regime removes the "recovers between spikes" dynamic that mutes
+the effect everywhere else in this project — both results are correct; they're answering
+different questions (steady-state Severe vs. realistic regime-switching).
+
+### Edge cases — all 8 pass
+
+No jumps → zero jump events, exactly. No Hawkes → demand variance matches the Poisson
+signature (variance ≈ mean). Perfect shipments → shipment-risk premium exactly zero.
+Unlimited inventory → scarcity premium exactly zero. No commitments → commitment premium
+exactly zero. Normal-only transition matrix → the regime switcher never leaves Normal.
+Zero military share + overlay off → exactly zero military-tagged orders. Identical
+military/civilian elasticity + overlay off → fill rates converge to within 5 points,
+directly confirming Phase 4/9's finding that the price-sensitivity DIFFERENCE — not the
+tag itself — drives the fill-rate gap.
+
+### Qualitative historical consistency — 3 of 5 hold, and the other 2 are a real finding, not a failure
+
+![Validation summary](results/figures/phase10_validation_summary.png)
+
+| Check | Holds? | Severe | Normal |
+|---|---|---|---|
+| Spreads widen under Severe | ✅ | $10.08 | $10.03 |
+| Demand clusters more under Severe | ✅ | var 2.95 | var 1.22 |
+| Civilian-military reliability gap widens under Severe | ✅ | 0.250 | 0.207 |
+| Scarcity premium increases under Severe | ❌ | $0.032 | $0.226 |
+| Stockouts more common under Severe | ❌ | 0.1 days | 0.7 days |
+
+**Dug into the mechanism rather than just reporting the mismatch:** under pinned-Severe,
+the scarcity-adjusted policy's own premiums push average ask markup to **12.5%** (vs.
+**4.5%** Normal), collapsing fill rate to **4.3%** (vs. **34.0%**). The dealer is pricing
+customers OUT aggressively enough that physical inventory ends up LESS depleted under
+Severe than Normal (mean 364.8 kg vs. 301.9 kg; minimum 187.0 kg vs. 32.5 kg) — textbook
+price rationing preventing the shortage a naive fixed-price model would show. The "naive"
+prediction implicitly assumes a dealer whose pricing doesn't adapt; testing it against a
+policy explicitly built to adapt was always going to complicate that prediction once the
+adaptation actually works. This is reported as a genuine result, not smoothed into "3 of
+5 pass" without the mechanism.
+
+### Mastery checkpoint
+
+**A true input-output economic study** uses observed prices, quantities, and real
+economic tables to estimate how a shock propagates through actual markets — it measures
+something that happened or statistically infers something that plausibly would.
+**This project's qualitative consistency check** instead runs its own simulation twice
+(pinned-Severe vs. Normal, identical seeds) and checks whether the DIRECTION of change
+matches what the real 2023-2025 episode's qualitative shape suggests (phase0_research_
+notes.md §2) — it is not fit to any real price series, transaction record, or dealer
+P&L, because none exist publicly for gallium (docs/README_honesty_paragraph.md). Five
+directional checks, three confirmed cleanly, two revealing that this project's own
+pricing policy is sophisticated enough to complicate a naive prediction — that is the
+entire scope of what this check can honestly claim.
+
+### Explicit Phase 10 limitations (Core Rule test)
+
+- The qualitative consistency check is directional only — it cannot be, and does not
+  claim to be, a calibration exercise.
+- Mathematical-relationship and edge-case checks confirm the IMPLEMENTED formulas behave
+  as documented; they cannot confirm the formulas are the "correct" way to model a real
+  gallium dealer, which this project has never claimed anywhere.
+- Edge-case checks use small, fast configurations chosen for quick deterministic
+  confirmation, not Phase 8-grade statistical rigor.
+- The qualitative check's two "failed" directional predictions are a feature of testing
+  an adaptive pricing policy, not a general claim that scarcity/stockouts never rise
+  under stress in this project — Phase 8's own holdout comparisons (e.g. persistent
+  severe regime vs. fixed-spread) show plenty of scenarios where physical outcomes do
+  deteriorate; this check specifically isolates the scarcity-ADJUSTED policy's own
+  rationing behavior.
+
+If Phase 10 were removed: none of this project's many formula-level and edge-case claims,
+scattered across a dozen module docstrings, would have a single consolidated confirmation
+that they actually hold — and the "does this move the right direction historically"
+question the roadmap explicitly asks for would remain unanswered, or worse, answered only
+by assumption rather than by actually running the comparison.
+
+---
+
 ## Repository structure (current)
 
 ```
@@ -1257,6 +1367,7 @@ GaMM-RX/
 │   ├── holdout_scenarios.py
 │   ├── ablation.py
 │   ├── sensitivity.py
+│   ├── validation.py
 │   └── policies/
 │       ├── fixed_spread.py
 │       ├── inventory_heuristic.py
@@ -1292,7 +1403,8 @@ GaMM-RX/
 │   ├── test_evaluation.py
 │   ├── test_holdout_scenarios.py
 │   ├── test_ablation.py
-│   └── test_sensitivity.py
+│   ├── test_sensitivity.py
+│   └── test_validation.py
 └── results/
     └── figures/
         ├── phase1_demo_run.png
@@ -1314,7 +1426,8 @@ GaMM-RX/
         ├── phase8_policy_comparison_with_ci.png
         ├── phase8_holdout_scenario_comparison.png
         ├── phase9_tornado_chart.png
-        └── phase9_overlay_frontier.png
+        ├── phase9_overlay_frontier.png
+        └── phase10_validation_summary.png
 ```
 
 Modules planned by the full roadmap (`regimes.py`, `scarcity_adjusted_as.py`,
@@ -1324,8 +1437,7 @@ they are listed in the project roadmap as future work, not represented here as f
 
 ## Future Work
 
-- Everything in Phases 10-11 of the roadmap: qualitative historical validation and the
-  results dashboard.
+- The results dashboard (Phase 11 of the roadmap) — the last substantive phase remaining.
 - A full-factorial or Sobol-index sensitivity analysis — Phase 9's one-at-a-time design
   cannot detect interaction effects between parameters (e.g., whether safety stock only
   matters when reliability is also low).

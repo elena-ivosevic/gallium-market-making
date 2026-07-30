@@ -863,6 +863,67 @@ already-established root cause) genuine same-day cross-channel contention is rar
 
 ---
 
+## 17. Phase 10 implementation values (validation and historical framing)
+
+### 17.1 Required language (stated here verbatim, applies to every result in this section)
+
+> Historical events are used to assess directional plausibility, not to claim that the
+> model has been calibrated to realized dealer prices or profits.
+
+### 17.2 Mathematical relationship checks — all 8 pass
+
+Every roadmap-specified relationship, confirmed directly in `src/validation.py`: more
+inventory lowers the reservation price; higher volatility widens the spread; less time
+remaining weakens the standard inventory adjustment; higher jump intensity increases
+price variance; greater commitments raise the reservation price; lower reliability
+raises the shipment-risk premium; lower available inventory raises the scarcity premium;
+and the priority overlay at p=1 produces a military-linked fill rate at or above the
+civilian rate during a pinned Severe regime specifically (confirmed with a wide margin —
+21.7% vs. 0.3% — much starker than Phase 5/7's finding that the overlay's effect is small
+at *default*, non-pinned calibration; pinning the regime removes the "recovers between
+spikes" dynamic that mutes the effect elsewhere in this project).
+
+### 17.3 Edge-case checks — all 8 pass
+
+No jumps → zero jump events (exact). No Hawkes excitation → demand variance stays within
+Poisson-like bounds (variance ≈ mean, the Poisson signature). Perfect shipments (100%
+reliability) → shipment-risk premium exactly zero. Unlimited inventory → scarcity premium
+exactly zero. No commitments → commitment premium exactly zero. Normal-regime-only
+transition matrix → regime switcher never leaves Normal across 200 simulated days.
+Zero military-linked share + overlay off → exactly zero military-tagged orders generated
+(not just few). Identical military/civilian elasticity + overlay off → fill rates converge
+to within 5 percentage points (41.4% vs. 40.3% at n=15 seeds), directly confirming Phase
+4/9's finding that the price-sensitivity DIFFERENCE, not the tag itself, drives the
+military-vs-civilian fill-rate gap.
+
+### 17.4 Qualitative historical consistency check — 3 of 5 hold in the naive direction, and the 2 that don't are a real, coherent finding
+
+Comparing a persistent-Severe-regime run (Phase 8's `PERSISTENT_SEVERE_REGIME` holdout)
+against an equivalent Normal-regime run, same seeds:
+
+| Check | Holds? | Severe value | Normal value |
+|---|---|---|---|
+| Spreads widen under Severe | ✅ Yes | $10.08 | $10.03 |
+| Demand clusters more under Severe | ✅ Yes | variance 2.95 | variance 1.22 |
+| Civilian-military reliability gap widens under Severe | ✅ Yes | 0.250 | 0.207 |
+| Scarcity (mean scarcity premium) increases under Severe | ❌ No | $0.032 | $0.226 |
+| Stockouts more common under Severe | ❌ No | 0.1 days | 0.7 days |
+
+**The two "failures" are not a bug — they're a genuine, economically coherent finding,
+confirmed directly rather than assumed:** under the pinned-Severe scenario, the
+scarcity-adjusted policy's own premiums push the average ask markup to **12.5%** (vs.
+**4.5%** under Normal), collapsing fill rate to **4.3%** (vs. **34.0%** under Normal). The
+policy is pricing customers OUT aggressively enough that physical inventory is actually
+LESS depleted under Severe than under Normal (mean physical inventory 364.8 kg vs. 301.9
+kg; minimum 187.0 kg vs. 32.5 kg) — textbook price rationing preventing the shortage a
+naive fixed-price model would show. The "naive" directional prediction implicitly assumes
+a dealer whose pricing doesn't adapt; testing it against a policy explicitly BUILT to
+adapt its pricing under scarcity was always going to complicate that prediction once
+the pricing response is actually effective. Logged here as a real result, not smoothed
+into "3 of 5 checks pass" without the mechanism behind the other 2.
+
+---
+
 ## Notes on how to use this table
 
 1. No parameter is added to code before it has a row here.
